@@ -1,0 +1,16 @@
+{
+  "name": "benyjoe-cinie-ia",
+  "version": "4.0.0",
+  "description": "BENY-JOE CINIE IA — Studio Cinématographique Ultime v4. Fondé par KHEDIM BENYAKHLEF dit BENY-JOE. Propulsé par Google Gemini 2.0 Flash.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": ["cinema", "ia", "gemini", "scenario", "film", "production"],
+  "author": "KHEDIM BENYAKHLEF dit BENY-JOE",
+  "license": "PROPRIETARY"
+}
