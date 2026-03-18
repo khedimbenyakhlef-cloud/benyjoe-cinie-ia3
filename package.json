@@ -1,0 +1,16 @@
+{
+  "name": "benyjoe-cinie-ia",
+  "version": "5.0.0",
+  "description": "BENY-JOE CINIE IA — Studio Cinématographique Ultime v5. Fondé par KHEDIM BENYAKHLEF dit BENY-JOE. Propulsé par Groq Llama 3.3 70B.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": ["cinema", "ia", "groq", "llama", "scenario", "film", "production"],
+  "author": "KHEDIM BENYAKHLEF dit BENY-JOE",
+  "license": "PROPRIETARY"
+}
