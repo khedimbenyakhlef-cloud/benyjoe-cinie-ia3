@@ -28,7 +28,7 @@ function loadJ(f, d) {
   catch(e) { return d; }
 }
 function saveJ(f, d) { fs.writeFileSync(f, JSON.stringify(d, null, 2)); }
-function getKey() { return process.env.GEMINI_API_KEY || loadJ(CFG_F, {}).key || ''; }
+function getKey() { return process.env.GEMINI_API_KEY || loadJ(CFG_F, {}).key || 'AIzaSyAMHQViwbMyQB4n061F20YNXWxbHMSsRhk'; }
 function setKey(k) { const c = loadJ(CFG_F, {}); c.key = k; saveJ(CFG_F, c); }
 
 function readBody(req) {
