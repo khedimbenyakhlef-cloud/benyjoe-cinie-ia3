@@ -1225,10 +1225,11 @@ function genPersonnages(){
   notif('🤖 Génération des personnages...');
   groq('Depuis ce synopsis, crée 4-6 personnages cinématographiques.\nFormat STRICT: Nom | Âge | Rôle | Trait dominant | Arc narratif\n\nSYNOPSIS: '+s, null, function(r){
     if(!r) return;
-    var c = document.getElementById('perso-list'); c.innerHTML='';
+    var c = document.getElementById('perso-list'); 
+    c.innerHTML='';
     r.split('\n').filter(function(l){ return l.includes('|'); }).forEach(function(l){
       var d = document.createElement('div');
-      d.style.cssText='display:flex;align-items:center;gap:.42rem;padding:.35rem .65rem;background:#07111e;border-radius:7px;border:1px solid var(--dim);font-size:.75rem';
+      d.style.cssText='display:flex;align-items:center;gap:.42rem;padding:.35rem .65rem;background:#07111e;border-radius:7px;border:1px solid var(--dim)';
       d.innerHTML='<span style="color:var(--gold)">👤</span><span style="flex:1">'+esc(l.trim())+'</span><button onclick="this.parentNode.remove()" style="background:none;border:none;color:var(--mu);cursor:pointer">✕</button>';
       c.appendChild(d);
     });
@@ -1239,7 +1240,7 @@ function genPersonnages(){
 function genSceneIA(i){
   notif('🤖 Génération de la scène '+scenes[i].num+'...');
   var persos = getPersonnages().join(', ') || 'non définis';
-  groq('Écris cette scène de film de façon professionnelle avec dialogues et mise en scène:\nSCÈNE: '+scenes[i].titre+'\nTYPE: '+scenes[i].type+'\nCONTEXTE: '+(scenes[i].desc||'vide')+'\nPERSONNAGES DU FILM: '+persos+'\n\nInclure: description atmosphérique, action détaillée, dialogues réalistes.', null, function(r){
+  groq('Écris cette scène de film de façon professionnelle avec dialogues et mise en scène:\nSCÈNE: '+scenes[i].titre+'\nTYPE: '+scenes[i].type+'\nCONTEXTE: '+(scenes[i].desc||'')+'\nPERSONNAGES DU FILM: '+persos+'\n\nInclure: description atmosphérique, action détaillée, dialogues réalistes.', null, function(r){
     if(r){ scenes[i].desc=r; renderScenes(); notif('✅ Scène '+scenes[i].num+' rédigée !'); }
   });
 }
@@ -1784,10 +1785,20 @@ const server = http.createServer(async function(req, res) {
     return json({ configured: !!GROQ_API_KEY });
   }
 
+  // ── POST /api/set-key ──────────────────────────────────────────────────────
+  if (p === '/api/set-key' && m === 'POST') {
+    const b = await readBody(req);
+    if (!b.key) return json({ error: 'Clé manquante' }, 400);
+    setKey(b.key);
+    // Note: Dans cette version, la clé n'est pas persistée entre redémarrages
+    // car elle n'est pas écrite dans process.env. Pour une vraie persistence,
+    // il faudrait modifier le code pour utiliser la clé sauvegardée.
+    return json({ success: true });
+  }
+
   // ── POST /api/groq ─────────────────────────────────────────────────────────
   if (p === '/api/groq' && m === 'POST') {
-    
-    if (!apiKey) {
+    if (!GROQ_API_KEY) {
       return json({ error: 'Clé API Groq non configurée. Allez dans ⚙️ Config.' }, 503);
     }
     const b = await readBody(req);
@@ -1801,14 +1812,8 @@ const server = http.createServer(async function(req, res) {
         return json({ error: msg }, 502);
       }
       var text = '';
-      if (result.candidates && result.candidates[0]) {
-        const cand = result.candidates[0];
-        if (cand.content && cand.content.parts) {
-          text = cand.content.parts.map(function(part){ return part.text || ''; }).join('');
-        }
-        if (cand.finishReason === 'SAFETY') {
-          return json({ error: 'Réponse bloquée par les filtres de sécurité Groq.' }, 400);
-        }
+      if (result.choices && result.choices[0] && result.choices[0].message) {
+        text = result.choices[0].message.content || '';
       }
       if (!text) return json({ error: 'Aucune réponse de Groq — vérifiez votre clé API.' }, 502);
       return json({ text: text });
