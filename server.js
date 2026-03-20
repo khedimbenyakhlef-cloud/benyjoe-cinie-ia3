@@ -1,1020 +1,1884 @@
 /**
- * BENY-JOE CINIE IA — Serveur Tout-en-Un
+ * BENY-JOE CINIE IA — v4 ULTIMATE
  * Fondé par KHEDIM BENYAKHLEF dit BENY-JOE
- * Clé API : variable d'environnement UNIQUEMENT — jamais dans le code
+ * Propulsé par Google Groq Llama 3.3 70B
+ * Plan gratuit Groq : 1500 requêtes/jour — 100% GRATUIT
  */
 
-const http = require('http');
+'use strict';
+const http  = require('http');
 const https = require('https');
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
+const fs    = require('fs');
+const path  = require('path');
 
-const PORT = process.env.PORT || 3000;
-const DATA_DIR = path.join(__dirname, '_data');
+const PORT = process.env.PORT || 10000;
+
+const DATA_DIR = process.env.RENDER
+  ? '/opt/render/project/src/_data'
+  : path.join(__dirname, '_data');
+
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// ─── UTILITAIRES ─────────────────────────────────────────────────────────────
-const hashPwd = p => crypto.createHash('sha256').update(p + 'bjci_salt_2025').digest('hex');
-const genToken = () => crypto.randomBytes(32).toString('hex');
-const loadJ = (f, d = {}) => { try { return JSON.parse(fs.readFileSync(f,'utf8')); } catch(e){ return d; } };
-const saveJ = (f, d) => fs.writeFileSync(f, JSON.stringify(d, null, 2));
-const USERS_F = path.join(DATA_DIR, 'users.json');
-const SESS_F  = path.join(DATA_DIR, 'sessions.json');
-const CFG_F   = path.join(DATA_DIR, 'config.json');
+const CFG_F      = path.join(DATA_DIR, 'config.json');
+const EXPORTS_DIR = path.join(DATA_DIR, 'exports');
+if (!fs.existsSync(EXPORTS_DIR)) fs.mkdirSync(EXPORTS_DIR, { recursive: true });
 
-function initAdmin() {
-  const u = loadJ(USERS_F, {});
-  if (!Object.keys(u).length) {
-    u['benyjoe'] = { username:'benyjoe', password:hashPwd('cinie2025'), role:'admin', name:'KHEDIM BENYAKHLEF' };
-    saveJ(USERS_F, u);
-    console.log('✅ Admin créé : benyjoe / cinie2025');
-  }
+function loadJ(f, d) {
+  try { return JSON.parse(fs.readFileSync(f, 'utf8')); }
+  catch(e) { return d; }
 }
+function saveJ(f, d) { fs.writeFileSync(f, JSON.stringify(d, null, 2)); }
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+function setKey(k) { const c = loadJ(CFG_F, {}); c.key = k; saveJ(CFG_F, c); }
 
-function createSession(username) {
-  const s = loadJ(SESS_F, {});
-  const t = genToken();
-  s[t] = { username, exp: Date.now() + 86400000 * 7 };
-  saveJ(SESS_F, s);
-  return t;
-}
-
-function validateSession(token) {
-  if (!token) return null;
-  const s = loadJ(SESS_F, {});
-  const sess = s[token];
-  if (!sess || Date.now() > sess.exp) { if(sess){ delete s[token]; saveJ(SESS_F,s); } return null; }
-  return sess.username;
-}
-
-function getApiKey() {
-  return process.env.ANTHROPIC_API_KEY || loadJ(CFG_F, {}).key || null;
-}
-
-function setApiKey(key) {
-  const c = loadJ(CFG_F, {});
-  c.key = key;
-  saveJ(CFG_F, c);
-}
-
-function parseBody(req) {
-  return new Promise(res => {
-    let b = '';
-    req.on('data', c => b += c);
-    req.on('end', () => { try { res(JSON.parse(b)); } catch { res({}); } });
+function readBody(req) {
+  return new Promise(function(ok) {
+    var s = '';
+    var timeout = setTimeout(function(){ ok({}); }, 30000);
+    req.on('data', function(c) { s += c; });
+    req.on('end', function() {
+      clearTimeout(timeout);
+      try { ok(JSON.parse(s)); } catch(e) { ok({}); }
+    });
+    req.on('error', function(){ clearTimeout(timeout); ok({}); });
   });
 }
 
-function getToken(req) {
-  return (req.headers.authorization || '').replace('Bearer ', '').trim();
+// ─── APPEL API GROQ (Llama 3.3 70B) ─────────────────────────────────────────
+function callGroq(messages, system) {
+  return new Promise(function(ok, fail) {
+    var msgs = [];
+    if (system) msgs.push({ role: 'system', content: system });
+    messages.forEach(function(m) {
+      msgs.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content });
+    });
+
+    var payload = JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: msgs,
+      temperature: 0.82,
+      max_tokens: 8000
+    });
+
+    var options = {
+      hostname: 'api.groq.com',
+      path: '/openai/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + GROQ_API_KEY,
+        'Content-Length': Buffer.byteLength(payload)
+      }
+    };
+
+    var apiReq = https.request(options, function(apiRes) {
+      var data = '';
+      apiRes.on('data', function(c) { data += c; });
+      apiRes.on('end', function() {
+        try { ok(JSON.parse(data)); }
+        catch(e) { fail(new Error('Erreur parsing réponse Groq')); }
+      });
+    });
+
+    apiReq.on('error', fail);
+    apiReq.setTimeout(60000, function(){ apiReq.destroy(new Error('Timeout')); });
+    apiReq.write(payload);
+    apiReq.end();
+  });
 }
 
-// ─── HTML FRONTEND (tout en un) ───────────────────────────────────────────────
-const HTML = `<!DOCTYPE html>
+// ─── SAUVEGARDE EXPORT FICHIER ────────────────────────────────────────────────
+function saveExport(name, content) {
+  var ts   = Date.now();
+  var file = path.join(EXPORTS_DIR, ts + '_' + name);
+  fs.writeFileSync(file, content, 'utf8');
+  return ts + '_' + name;
+}
+
+function listExports() {
+  try {
+    return fs.readdirSync(EXPORTS_DIR).map(function(f) {
+      var full = path.join(EXPORTS_DIR, f);
+      var stat = fs.statSync(full);
+      return { name: f, size: stat.size, date: stat.mtimeMs };
+    }).sort(function(a,b){ return b.date - a.date; });
+  } catch(e) { return []; }
+}
+
+// ─── PAGE HTML ────────────────────────────────────────────────────────────────
+var PAGE = `<!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BENY-JOE CINIE IA — Studio</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='30' fill='%23070b12' stroke='%23c9a84c' stroke-width='2'/><circle cx='32' cy='32' r='14' fill='none' stroke='%23c9a84c' stroke-width='2'/><circle cx='32' cy='32' r='9' fill='%230d1321'/><text x='32' y='37' font-family='serif' font-size='11' font-weight='900' fill='%23c9a84c' text-anchor='middle'>BJ</text></svg>">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BENY-JOE CINIE IA — Studio Ultime v4</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=Cinzel:wght@400;700;900&family=Lato:wght@300;400;700;900&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='30' fill='%23060a10' stroke='%23c9a84c' stroke-width='2.5'/><text x='32' y='40' font-size='16' font-weight='900' fill='%23c9a84c' text-anchor='middle' font-family='serif'>BJ</text></svg>">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Lato:wght@300;400;700&display=swap');
-*{margin:0;padding:0;box-sizing:border-box;}
-:root{--gold:#c9a84c;--gold2:#e8c96a;--gold3:#f5e4a0;--dark:#070b12;--dark2:#0d1321;--dark3:#111827;--card:#0d1a2e;--card2:#0f1f35;--text:#e8edf5;--muted:#7a8fa8;--dim:#3a4f66;--red:#e05555;--green:#3db880;--blue:#4a9eff;--border:rgba(201,168,76,0.18);--radius:12px;}
-body{font-family:'Lato',sans-serif;background:var(--dark);color:var(--text);min-height:100vh;overflow-x:hidden;}
-::-webkit-scrollbar{width:5px;height:5px;}::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px;}::-webkit-scrollbar-thumb:hover{background:var(--gold);}
-#auth-screen{position:fixed;inset:0;background:var(--dark);display:flex;align-items:center;justify-content:center;z-index:9999;flex-direction:column;gap:1.5rem;}
-.auth-logo{font-family:'Cinzel',serif;font-size:2.4rem;font-weight:900;background:linear-gradient(135deg,var(--gold),var(--gold3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-align:center;letter-spacing:4px;}
-.auth-founder{color:var(--gold);font-size:.72rem;text-align:center;letter-spacing:1.5px;opacity:.8;}
-.auth-box{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:2rem;width:370px;display:flex;flex-direction:column;gap:1rem;}
-.auth-tabs{display:flex;border-radius:10px;overflow:hidden;border:1px solid var(--dim);}
-.auth-tab{flex:1;padding:.55rem;background:transparent;border:none;color:var(--muted);font-size:.8rem;font-weight:700;cursor:pointer;transition:.2s;}
-.auth-tab.active{background:rgba(201,168,76,0.15);color:var(--gold);}
-.auth-panel{display:flex;flex-direction:column;gap:.8rem;}
-.auth-box input{background:#0a1525;border:1px solid var(--dim);border-radius:8px;padding:.8rem 1rem;color:var(--text);font-size:.9rem;outline:none;transition:.2s;width:100%;}
-.auth-box input:focus{border-color:var(--gold);}
-.auth-btn{background:linear-gradient(135deg,#8a6418,var(--gold));color:#0d0a02;font-weight:700;border:none;border-radius:8px;padding:.85rem;cursor:pointer;font-size:.95rem;letter-spacing:1px;transition:.2s;}
-.auth-btn:hover{filter:brightness(1.1);}
-.auth-err{color:var(--red);font-size:.82rem;text-align:center;display:none;}
-.film-strip{display:flex;gap:4px;justify-content:center;}
-.film-cell{width:28px;height:20px;background:var(--dim);border-radius:2px;opacity:.3;}
-.film-cell:nth-child(3n){opacity:.6;}
-header{background:rgba(7,11,18,.95);border-bottom:1px solid var(--border);padding:.7rem 1.5rem;display:flex;align-items:center;gap:1rem;position:sticky;top:0;z-index:100;backdrop-filter:blur(10px);}
-.logo{font-family:'Cinzel',serif;font-size:1.1rem;font-weight:900;background:linear-gradient(135deg,var(--gold),var(--gold3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:3px;white-space:nowrap;}
-.logo-sub{font-size:.55rem;color:var(--muted);letter-spacing:2px;}
-nav{display:flex;gap:.25rem;flex-wrap:wrap;margin-left:.3rem;}
-.nav-btn{padding:.45rem .8rem;border:1px solid transparent;border-radius:20px;background:transparent;color:var(--muted);font-size:.72rem;font-weight:600;cursor:pointer;letter-spacing:.5px;transition:.2s;}
-.nav-btn:hover,.nav-btn.active{background:rgba(201,168,76,0.12);border-color:var(--border);color:var(--gold);}
-.header-right{margin-left:auto;display:flex;align-items:center;gap:.8rem;}
-.dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;display:inline-block;}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.user-info{font-size:.72rem;color:var(--gold);font-weight:700;}
-.logout-btn{padding:.3rem .65rem;border-radius:7px;border:1px solid var(--dim);background:transparent;color:var(--muted);font-size:.7rem;cursor:pointer;transition:.2s;}
-.logout-btn:hover{border-color:var(--red);color:var(--red);}
-.app{display:none;flex-direction:column;min-height:100vh;}
-.app.visible{display:flex;}
-.main{flex:1;padding:1.5rem 2rem;max-width:1600px;margin:0 auto;width:100%;}
-.tab{display:none;}.tab.active{display:block;}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.4rem;margin-bottom:1.4rem;}
-.card-title{font-family:'Cinzel',serif;font-size:.9rem;color:var(--gold);letter-spacing:2px;margin-bottom:1.1rem;display:flex;align-items:center;gap:.6rem;}
-.card-title::before{content:'';display:block;width:3px;height:14px;background:var(--gold);border-radius:2px;}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:1.1rem;}
-.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1.1rem;}
-.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;}
-@media(max-width:900px){.grid2,.grid3,.grid4{grid-template-columns:1fr 1fr;}}
-@media(max-width:600px){.grid2,.grid3,.grid4{grid-template-columns:1fr;}.main{padding:1rem;}nav{display:none;}}
-label{font-size:.76rem;color:var(--muted);display:block;margin-bottom:.35rem;letter-spacing:.5px;}
-input,textarea,select{width:100%;background:#060d19;border:1px solid var(--dim);border-radius:8px;padding:.7rem .9rem;color:var(--text);font-size:.86rem;font-family:'Lato',sans-serif;outline:none;transition:.2s;resize:vertical;}
-input:focus,textarea:focus,select:focus{border-color:var(--gold);}
-textarea{min-height:110px;}
-.btn{padding:.6rem 1.2rem;border-radius:8px;border:none;cursor:pointer;font-size:.8rem;font-weight:700;letter-spacing:.5px;transition:.2s;display:inline-flex;align-items:center;gap:.4rem;font-family:'Lato',sans-serif;}
-.btn-gold{background:linear-gradient(135deg,#7a5512,var(--gold));color:#0d0a02;}.btn-gold:hover{filter:brightness(1.15);}
-.btn-outline{background:transparent;border:1px solid var(--dim);color:var(--text);}.btn-outline:hover{border-color:var(--gold);color:var(--gold);}
-.btn-red{background:rgba(224,85,85,.15);border:1px solid rgba(224,85,85,.3);color:var(--red);}
-.btn:disabled{opacity:.4;cursor:not-allowed;}
-.type-pills{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.9rem;}
-.pill{padding:.35rem .8rem;border-radius:20px;border:1px solid var(--dim);font-size:.75rem;cursor:pointer;color:var(--muted);transition:.2s;}
-.pill:hover,.pill.active{background:rgba(201,168,76,0.15);border-color:var(--gold);color:var(--gold);}
-.scene-list{display:flex;flex-direction:column;gap:.7rem;}
-.scene-item{background:#07111e;border:1px solid var(--dim);border-radius:10px;padding:.9rem;display:flex;gap:.7rem;align-items:flex-start;}
-.scene-num{min-width:26px;height:26px;border-radius:50%;background:rgba(201,168,76,.15);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:.72rem;color:var(--gold);font-weight:700;}
-.chat-messages{background:#060d19;border:1px solid var(--dim);border-radius:10px;padding:.9rem;height:340px;overflow-y:auto;display:flex;flex-direction:column;gap:.6rem;}
-.msg{padding:.65rem .9rem;border-radius:10px;max-width:85%;font-size:.83rem;line-height:1.5;}
-.msg-ai{background:var(--card2);border:1px solid var(--border);align-self:flex-start;}
-.msg-user{background:rgba(201,168,76,.12);border:1px solid rgba(201,168,76,.2);align-self:flex-end;}
-.msg-name{font-size:.67rem;font-weight:700;margin-bottom:.2rem;}
-.msg-ai .msg-name{color:var(--gold);}.msg-user .msg-name{color:var(--muted);}
-.chat-row{display:flex;gap:.5rem;margin-top:.7rem;}.chat-row input{flex:1;}
-.tool-card{background:var(--card2);border:1px solid var(--dim);border-radius:var(--radius);padding:1.1rem;cursor:pointer;transition:.2s;text-align:center;}
-.tool-card:hover{border-color:var(--gold);transform:translateY(-2px);}
-.tool-icon{font-size:1.7rem;margin-bottom:.5rem;}.tool-name{font-size:.82rem;font-weight:700;color:var(--text);margin-bottom:.25rem;}.tool-desc{font-size:.7rem;color:var(--muted);line-height:1.4;}
-.tool-badge{font-size:.62rem;padding:.12rem .45rem;border-radius:7px;margin-top:.35rem;display:inline-block;}
-.badge-free{background:rgba(61,184,128,.15);border:1px solid rgba(61,184,128,.3);color:var(--green);}
-.badge-api{background:rgba(74,158,255,.15);border:1px solid rgba(74,158,255,.3);color:var(--blue);}
-.output-box{background:#040a14;border:1px solid var(--dim);border-radius:10px;padding:1.1rem;min-height:130px;font-size:.82rem;line-height:1.6;color:var(--text);white-space:pre-wrap;}
-.output-actions{display:flex;gap:.45rem;margin-top:.6rem;flex-wrap:wrap;}
-.progress-bar{height:4px;background:var(--dim);border-radius:2px;margin:.8rem 0;overflow:hidden;}
-.progress-fill{height:100%;background:linear-gradient(90deg,var(--gold),var(--gold3));border-radius:2px;transition:width .5s;width:0%;}
-.steps{display:flex;gap:0;margin-bottom:1.3rem;overflow-x:auto;}
-.step{flex:1;min-width:75px;padding:.55rem;text-align:center;font-size:.68rem;color:var(--muted);border-bottom:2px solid var(--dim);transition:.2s;}
-.step.active{color:var(--gold);border-bottom-color:var(--gold);}
-.drop-zone{border:2px dashed var(--dim);border-radius:10px;padding:1.8rem;text-align:center;cursor:pointer;transition:.2s;color:var(--muted);font-size:.83rem;}
-.drop-zone:hover{border-color:var(--gold);color:var(--gold);}
-.drop-zone input{display:none;}
-.timeline{display:flex;gap:2px;overflow-x:auto;background:#04090f;border:1px solid var(--dim);border-radius:8px;padding:.5rem;min-height:70px;align-items:center;}
-.tl-clip{background:rgba(201,168,76,.2);border:1px solid var(--border);border-radius:4px;height:44px;min-width:75px;padding:.25rem .45rem;font-size:.65rem;color:var(--gold);cursor:pointer;transition:.2s;display:flex;flex-direction:column;justify-content:space-between;}
-.settings-row{display:flex;align-items:center;padding:.8rem 0;border-bottom:1px solid rgba(255,255,255,.05);}
-.settings-label{flex:1;font-size:.85rem;}.settings-hint{font-size:.72rem;color:var(--muted);margin-top:.12rem;}
-.toggle{width:38px;height:20px;background:var(--dim);border-radius:10px;position:relative;cursor:pointer;transition:.2s;}
-.toggle.on{background:var(--gold);}.toggle::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.2s;}.toggle.on::after{left:20px;}
-.loader{display:inline-block;width:15px;height:15px;border:2px solid var(--dim);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;}
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --gold:#c9a84c;--gold2:#f0d070;--gold3:#fff0b0;
+  --bg:#060a10;--bg2:#0b1220;--bg3:#0f1a2e;--bg4:#111e33;
+  --tx:#e2e8f0;--mu:#8096b0;--dim:#2a3d52;
+  --red:#e05555;--grn:#3db880;--blu:#4a9eff;--pur:#9b7fe8;
+  --bord:rgba(201,168,76,.18);--bord2:rgba(201,168,76,.35);
+  --ra:12px;--ra2:8px;
+  --sh:0 4px 24px rgba(0,0,0,.45);
+  --sh2:0 0 0 1px rgba(201,168,76,.12),0 8px 32px rgba(0,0,0,.6);
+}
+html{scroll-behavior:smooth}
+body{font-family:'Lato',sans-serif;background:var(--bg);color:var(--tx);min-height:100vh;overflow-x:hidden}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:#07111e}
+::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--gold)}
+
+/* ── HEADER ─────────────────────────────────────────── */
+#hdr{
+  background:rgba(6,10,16,.96);
+  border-bottom:1px solid var(--bord);
+  padding:.65rem 1.4rem;
+  display:flex;align-items:center;gap:1rem;
+  position:sticky;top:0;z-index:100;
+  backdrop-filter:blur(12px);
+}
+.brand{cursor:pointer;flex-shrink:0}
+.logo{font-family:'Cinzel',serif;font-size:1.1rem;font-weight:900;
+  background:linear-gradient(135deg,var(--gold),var(--gold3));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  letter-spacing:3px;line-height:1.2}
+.logo-sub{font-size:.5rem;color:var(--mu);letter-spacing:2.5px;text-transform:uppercase}
+#nav{display:flex;gap:.15rem;flex-wrap:wrap;flex:1;justify-content:center}
+.nb{
+  padding:.38rem .7rem;border:1px solid transparent;border-radius:20px;
+  background:transparent;color:var(--mu);font-size:.68rem;font-weight:700;
+  cursor:pointer;letter-spacing:.5px;transition:.15s;font-family:'Lato',sans-serif;
+  white-space:nowrap
+}
+.nb:hover{background:rgba(201,168,76,.1);border-color:var(--bord);color:var(--gold)}
+.nb.on{background:rgba(201,168,76,.15);border-color:var(--bord2);color:var(--gold)}
+.hdr-right{display:flex;align-items:center;gap:.6rem;flex-shrink:0}
+.live-dot{width:7px;height:7px;border-radius:50%;background:var(--grn);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(61,184,128,.4)}50%{opacity:.7;box-shadow:0 0 0 5px rgba(61,184,128,0)}}
+.live-txt{font-size:.66rem;color:var(--mu);display:flex;align-items:center;gap:.35rem}
+#ai-status-badge{font-size:.6rem;padding:.15rem .5rem;border-radius:10px;font-weight:700;background:rgba(224,85,85,.15);border:1px solid rgba(224,85,85,.3);color:var(--red)}
+#ai-status-badge.ok{background:rgba(61,184,128,.15);border-color:rgba(61,184,128,.3);color:var(--grn)}
+
+/* ── LAYOUT ─────────────────────────────────────────── */
+.main{padding:1.4rem 1.6rem;max-width:1600px;margin:0 auto}
+@media(max-width:700px){.main{padding:.7rem .6rem}#nav{display:none}}
+.tab{display:none}.tab.on{display:block;animation:fadeIn .22s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* ── CARDS ─────────────────────────────────────────── */
+.card{
+  background:var(--bg2);border:1px solid var(--bord);
+  border-radius:var(--ra);padding:1.3rem;margin-bottom:1.2rem;
+  box-shadow:var(--sh)
+}
+.card-hd{
+  font-family:'Cinzel',serif;font-size:.82rem;color:var(--gold);
+  letter-spacing:2px;margin-bottom:1.1rem;
+  display:flex;align-items:center;gap:.55rem
+}
+.card-hd::before{content:'';width:3px;height:14px;background:linear-gradient(var(--gold),var(--gold2));border-radius:2px;flex-shrink:0}
+
+/* ── GRIDS ─────────────────────────────────────────── */
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:.9rem}
+@media(max-width:900px){.g3,.g4{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.g2,.g3,.g4{grid-template-columns:1fr}}
+
+/* ── FORMS ─────────────────────────────────────────── */
+label{font-size:.7rem;color:var(--mu);display:block;margin-bottom:.32rem;letter-spacing:.5px;text-transform:uppercase}
+input,select,textarea{
+  width:100%;background:#060d1a;border:1px solid var(--dim);
+  border-radius:var(--ra2);padding:.62rem .85rem;color:var(--tx);
+  font-size:.83rem;font-family:'Lato',sans-serif;outline:none;
+  transition:.15s;resize:vertical
+}
+input:focus,select:focus,textarea:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(201,168,76,.1)}
+input::placeholder,textarea::placeholder{color:#3a4f66}
+textarea{min-height:100px;line-height:1.6}
+select option{background:#0b1220}
+
+/* ── BUTTONS ─────────────────────────────────────────── */
+.btn{
+  padding:.55rem 1.1rem;border-radius:var(--ra2);border:none;
+  cursor:pointer;font-size:.76rem;font-weight:700;letter-spacing:.4px;
+  transition:.18s;display:inline-flex;align-items:center;gap:.38rem;
+  font-family:'Lato',sans-serif;user-select:none;white-space:nowrap
+}
+.btn:active{transform:scale(.96)}
+.btn:disabled{opacity:.35;cursor:not-allowed;pointer-events:none}
+.btn-gold{background:linear-gradient(135deg,#7a5512,var(--gold));color:#0d0a02}
+.btn-gold:hover{filter:brightness(1.15);box-shadow:0 4px 16px rgba(201,168,76,.3)}
+.btn-out{background:transparent;border:1px solid var(--dim);color:var(--tx)}
+.btn-out:hover{border-color:var(--gold);color:var(--gold)}
+.btn-red{background:rgba(224,85,85,.12);border:1px solid rgba(224,85,85,.3);color:var(--red)}
+.btn-grn{background:rgba(61,184,128,.12);border:1px solid rgba(61,184,128,.3);color:var(--grn)}
+.btn-blu{background:rgba(74,158,255,.12);border:1px solid rgba(74,158,255,.3);color:var(--blu)}
+.btn-sm{padding:.3rem .65rem;font-size:.68rem}
+.btn-full{width:100%;justify-content:center}
+
+/* ── PILLS ─────────────────────────────────────────── */
+.pills{display:flex;flex-wrap:wrap;gap:.32rem;margin-bottom:.85rem}
+.pill{
+  padding:.3rem .72rem;border-radius:20px;border:1px solid var(--dim);
+  font-size:.7rem;cursor:pointer;color:var(--mu);transition:.15s;background:transparent
+}
+.pill:hover,.pill.on{background:rgba(201,168,76,.13);border-color:var(--bord2);color:var(--gold)}
+
+/* ── OUTPUT BOXES ─────────────────────────────────── */
+.out-box{
+  background:#040a14;border:1px solid var(--dim);border-radius:var(--ra2);
+  padding:1rem;min-height:130px;font-size:.8rem;line-height:1.7;
+  color:var(--tx);white-space:pre-wrap;word-break:break-word;
+  position:relative;overflow:auto;max-height:500px
+}
+.out-box.loading::after{
+  content:'';position:absolute;bottom:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,transparent,var(--gold),transparent);
+  animation:loading 1.5s ease-in-out infinite
+}
+@keyframes loading{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+.out-actions{display:flex;gap:.4rem;margin-top:.55rem;flex-wrap:wrap}
+
+/* ── PROGRESS BAR ─────────────────────────────────── */
+.pb-wrap{height:4px;background:var(--dim);border-radius:2px;margin:.7rem 0;overflow:hidden}
+.pb-fill{height:100%;background:linear-gradient(90deg,var(--gold),var(--gold3));border-radius:2px;transition:width .5s;width:0}
+
+/* ── TILE CARDS ─────────────────────────────────────── */
+.tc{
+  background:var(--bg3);border:1px solid var(--dim);border-radius:var(--ra);
+  padding:1.1rem;cursor:pointer;transition:.18s;text-align:center
+}
+.tc:hover{border-color:var(--gold);transform:translateY(-3px);box-shadow:0 8px 24px rgba(201,168,76,.15)}
+.tc.sel{border-color:var(--gold);background:rgba(201,168,76,.08)}
+.tc-icon{font-size:1.7rem;margin-bottom:.45rem}
+.tc-name{font-size:.82rem;font-weight:700;color:var(--tx);margin-bottom:.22rem}
+.tc-desc{font-size:.68rem;color:var(--mu);line-height:1.42}
+.badge{font-size:.58rem;padding:.12rem .42rem;border-radius:5px;margin-top:.35rem;display:inline-block;font-weight:700}
+.badge-grn{background:rgba(61,184,128,.15);border:1px solid rgba(61,184,128,.3);color:var(--grn)}
+.badge-blu{background:rgba(74,158,255,.15);border:1px solid rgba(74,158,255,.3);color:var(--blu)}
+.badge-gold{background:rgba(201,168,76,.15);border:1px solid rgba(201,168,76,.3);color:var(--gold)}
+.badge-pur{background:rgba(155,127,232,.15);border:1px solid rgba(155,127,232,.3);color:var(--pur)}
+
+/* ── SCENES ─────────────────────────────────────────── */
+.scene-item{
+  background:#07111e;border:1px solid var(--dim);border-radius:10px;
+  padding:.9rem;margin-bottom:.65rem;display:flex;gap:.7rem;
+  transition:.15s
+}
+.scene-item:hover{border-color:var(--bord)}
+.scene-num{
+  min-width:28px;height:28px;border-radius:50%;
+  background:rgba(201,168,76,.13);border:1px solid var(--bord);
+  display:flex;align-items:center;justify-content:center;
+  font-size:.7rem;color:var(--gold);font-weight:900;flex-shrink:0
+}
+.scene-body{flex:1;display:flex;flex-direction:column;gap:.38rem}
+.scene-row{display:flex;gap:.38rem}
+
+/* ── CHAT ─────────────────────────────────────────── */
+.chat-wrap{background:#060d1a;border:1px solid var(--dim);border-radius:10px;padding:.85rem;height:350px;overflow-y:auto;display:flex;flex-direction:column;gap:.55rem}
+.msg{padding:.65rem .9rem;border-radius:10px;max-width:86%;font-size:.81rem;line-height:1.55}
+.msg-ai{background:var(--bg3);border:1px solid var(--bord);align-self:flex-start}
+.msg-user{background:rgba(201,168,76,.1);border:1px solid rgba(201,168,76,.2);align-self:flex-end}
+.msg-name{font-size:.62rem;font-weight:700;margin-bottom:.18rem;letter-spacing:.5px}
+.msg-ai .msg-name{color:var(--gold)}.msg-user .msg-name{color:var(--mu)}
+.chat-input-row{display:flex;gap:.45rem;margin-top:.65rem}
+.chat-input-row input{flex:1}
+
+/* ── TIMELINE ─────────────────────────────────────── */
+.tl-track{display:flex;gap:3px;overflow-x:auto;background:#04090f;border:1px solid var(--dim);border-radius:7px;padding:.45rem;min-height:56px;align-items:center}
+.clip{
+  background:rgba(201,168,76,.18);border:1px solid var(--bord);border-radius:4px;
+  height:40px;min-width:80px;padding:.22rem .45rem;font-size:.62rem;
+  color:var(--gold);cursor:pointer;display:flex;flex-direction:column;
+  justify-content:space-between;position:relative;user-select:none
+}
+.clip:hover{background:rgba(201,168,76,.28)}
+.clip-del{position:absolute;top:2px;right:3px;background:none;border:none;color:var(--mu);cursor:pointer;font-size:.65rem;opacity:0;transition:.12s}
+.clip:hover .clip-del{opacity:1}
+.clip-audio{background:rgba(74,158,255,.15);border-color:rgba(74,158,255,.3);color:var(--blu)}
+.tl-lbl{font-size:.66rem;color:var(--mu);margin-bottom:.28rem}
+
+/* ── STORYBOARD ─────────────────────────────────────── */
+.sb-card{background:#07111e;border:1px solid var(--dim);border-radius:10px;padding:.9rem;transition:.15s}
+.sb-card:hover{border-color:var(--bord)}
+.sb-num{font-size:.65rem;color:var(--gold);font-weight:700;margin-bottom:.32rem;letter-spacing:.5px}
+.sb-prompt{font-size:.68rem;color:var(--mu);line-height:1.5;margin-bottom:.5rem;word-break:break-word}
+
+/* ── PRODUITS FINAUX ─────────────────────────────────── */
+.product-card{
+  background:var(--bg3);border:1px solid var(--bord);border-radius:var(--ra);
+  padding:1.2rem;transition:.2s;position:relative;overflow:hidden
+}
+.product-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--gold),transparent);
+  opacity:0;transition:.2s
+}
+.product-card:hover::before{opacity:1}
+.product-card:hover{border-color:var(--bord2);box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.product-type{font-size:.58rem;text-transform:uppercase;letter-spacing:1.5px;font-weight:700;margin-bottom:.5rem}
+.product-title{font-family:'Cinzel',serif;font-size:.95rem;color:var(--tx);margin-bottom:.35rem;line-height:1.3}
+.product-meta{font-size:.7rem;color:var(--mu);margin-bottom:.8rem;line-height:1.6}
+.product-preview{
+  background:#04090f;border:1px solid var(--dim);border-radius:var(--ra2);
+  padding:.85rem;min-height:100px;font-size:.73rem;line-height:1.6;
+  color:var(--tx);white-space:pre-wrap;word-break:break-word;
+  max-height:200px;overflow-y:auto;margin-bottom:.8rem
+}
+.product-actions{display:flex;gap:.38rem;flex-wrap:wrap}
+.product-empty{
+  text-align:center;padding:3rem;color:var(--dim);
+  grid-column:1/-1
+}
+.product-empty-icon{font-size:3rem;margin-bottom:.8rem}
+.product-empty-txt{font-size:.82rem}
+
+/* ── EXPORT VIEWER ─────────────────────────────────── */
+.export-row{
+  display:flex;align-items:center;gap:.8rem;padding:.75rem;
+  background:var(--bg3);border:1px solid var(--bord);border-radius:var(--ra2);
+  margin-bottom:.5rem;transition:.15s
+}
+.export-row:hover{border-color:var(--bord2)}
+.export-icon{font-size:1.3rem;flex-shrink:0}
+.export-info{flex:1}
+.export-name{font-size:.8rem;font-weight:700;color:var(--tx);word-break:break-all}
+.export-meta{font-size:.68rem;color:var(--mu);margin-top:.12rem}
+.export-acts{display:flex;gap:.35rem}
+
+/* ── SETTINGS ─────────────────────────────────────── */
+.srow{display:flex;align-items:center;padding:.75rem 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.srow:last-child{border:none}
+.slabel{flex:1;font-size:.83rem}
+.sdesc{font-size:.7rem;color:var(--mu);margin-top:.1rem}
+.toggle{width:38px;height:20px;background:var(--dim);border-radius:10px;position:relative;cursor:pointer;transition:.2s;flex-shrink:0}
+.toggle.on{background:var(--gold)}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.2s}
+.toggle.on::after{left:20px}
+
+/* ── MISC ─────────────────────────────────────────── */
+.hr{border:none;height:1px;background:linear-gradient(90deg,transparent,var(--bord),transparent);margin:.9rem 0}
+.tag{padding:.14rem .48rem;border-radius:5px;font-size:.64rem;background:rgba(255,255,255,.05);border:1px solid var(--dim);color:var(--mu)}
+.step-bar{display:flex;overflow-x:auto;margin-bottom:1.3rem;border-bottom:1px solid var(--dim)}
+.step-item{flex:1;min-width:65px;padding:.5rem .3rem;text-align:center;font-size:.65rem;color:var(--mu);border-bottom:2px solid transparent;transition:.15s;cursor:pointer}
+.step-item.on{color:var(--gold);border-bottom-color:var(--gold);font-weight:700}
+.dz{border:2px dashed var(--dim);border-radius:10px;padding:1.8rem;text-align:center;cursor:pointer;transition:.15s;color:var(--mu);font-size:.8rem}
+.dz:hover{border-color:var(--gold);color:var(--gold)}
+.dz input{display:none}
+footer{text-align:center;padding:.8rem;font-size:.65rem;color:var(--dim);border-top:1px solid var(--bord);margin-top:1.2rem}
+.ld{display:inline-block;width:13px;height:13px;border:2px solid var(--dim);border-top-color:var(--gold);border-radius:50%;animation:spin .65s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.notif{position:fixed;top:1rem;right:1.5rem;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.75rem 1.1rem;font-size:.8rem;z-index:9998;transform:translateX(110%);transition:.3s;max-width:300px;}
-.notif.show{transform:translateX(0);}.notif.success{border-color:rgba(61,184,128,.4);color:var(--green);}.notif.error{border-color:rgba(224,85,85,.4);color:var(--red);}
-.tag{padding:.18rem .55rem;border-radius:6px;font-size:.68rem;background:rgba(255,255,255,.06);border:1px solid var(--dim);color:var(--muted);}
-.row{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;}
-hr.fancy{border:none;height:1px;background:linear-gradient(90deg,transparent,var(--border),transparent);margin:1rem 0;}
-.founder-badge{font-size:.66rem;color:var(--gold);opacity:.7;letter-spacing:1.5px;text-align:center;}
-footer{text-align:center;padding:.8rem;font-size:.68rem;color:var(--dim);border-top:1px solid var(--border);}
+
+/* ── NOTIF TOAST ─────────────────────────────────── */
+#notif{
+  position:fixed;top:1.1rem;right:1.3rem;
+  background:var(--bg2);border:1px solid var(--bord);border-radius:10px;
+  padding:.72rem 1.1rem;font-size:.77rem;z-index:9999;
+  transform:translateX(140%);transition:.28s cubic-bezier(.34,1.56,.64,1);
+  max-width:300px;pointer-events:none;box-shadow:var(--sh)
+}
+#notif.show{transform:translateX(0)}
+#notif.ok{border-color:rgba(61,184,128,.4);color:var(--grn)}
+#notif.err{border-color:rgba(224,85,85,.4);color:var(--red)}
+
+/* ── MODAL ─────────────────────────────────────────── */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:9000;display:none;align-items:center;justify-content:center;padding:1rem}
+.modal-bg.open{display:flex;animation:fadeIn .18s ease}
+.modal{background:var(--bg2);border:1px solid var(--bord2);border-radius:var(--ra);padding:1.5rem;max-width:700px;width:100%;max-height:80vh;overflow-y:auto;box-shadow:var(--sh2)}
+.modal-hd{font-family:'Cinzel',serif;color:var(--gold);font-size:.95rem;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between}
+.modal-close{background:none;border:none;color:var(--mu);cursor:pointer;font-size:1.1rem;transition:.15s}
+.modal-close:hover{color:var(--red)}
+.modal-body{font-size:.83rem;line-height:1.72;white-space:pre-wrap;word-break:break-word;color:var(--tx)}
+
+/* ── ACCUEIL HERO ─────────────────────────────────── */
+.hero{
+  text-align:center;padding:2rem 0 1.8rem;
+  background:radial-gradient(ellipse at 50% 0%, rgba(201,168,76,.06) 0%, transparent 70%);
+  border-radius:var(--ra);margin-bottom:1.2rem
+}
+.hero-logo{font-family:'Cinzel Decorative',serif;font-size:clamp(1.4rem,4vw,2.4rem);font-weight:900;
+  background:linear-gradient(135deg,var(--gold),var(--gold3),var(--gold));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  letter-spacing:4px;line-height:1.25;margin-bottom:.4rem}
+.hero-sub{font-size:.72rem;color:var(--mu);letter-spacing:3px;text-transform:uppercase;margin-bottom:.6rem}
+.hero-author{font-size:.6rem;color:var(--gold);opacity:.6;letter-spacing:2px;margin-bottom:1rem}
+.hero-tags{display:flex;gap:.35rem;justify-content:center;flex-wrap:wrap;margin-bottom:1rem}
 </style>
 </head>
 <body>
 
-<div id="auth-screen">
-  <div>
-    <div style="font-size:3rem;text-align:center;">🎬</div>
-    <div class="auth-logo">BENY-JOE CINIE IA</div>
-    <div style="color:var(--muted);font-size:.82rem;text-align:center;letter-spacing:2px;">STUDIO DE PRODUCTION CINÉMATOGRAPHIQUE</div>
-    <div class="auth-founder" style="margin-top:.4rem;">✦ Fondé par KHEDIM BENYAKHLEF dit BENY-JOE ✦</div>
+<div id="hdr">
+  <div class="brand" onclick="show('home')">
+    <div class="logo">🎬 BENY-JOE CINIE IA</div>
+    <div class="logo-sub">Studio v4 Ultimate · Groq Llama 3.3</div>
   </div>
-  <div class="auth-box">
-    <div class="auth-tabs">
-      <button class="auth-tab active" onclick="switchTab('login',this)">🔐 Connexion</button>
-      <button class="auth-tab" onclick="switchTab('register',this)">✨ Inscription</button>
-    </div>
-    <div class="auth-panel" id="panel-login">
-      <div><label>Nom d'utilisateur</label><input type="text" id="login-user" placeholder="identifiant" autocomplete="username"></div>
-      <div><label>Mot de passe</label><input type="password" id="login-pass" placeholder="••••••••" autocomplete="current-password"></div>
-      <button class="auth-btn" id="login-btn" onclick="doLogin()">▶ ENTRER DANS LE STUDIO</button>
-      <div class="auth-err" id="login-err"></div>
-      <div style="font-size:.68rem;color:var(--dim);text-align:center;">Admin par défaut : benyjoe / cinie2025</div>
-    </div>
-    <div class="auth-panel" id="panel-register" style="display:none;">
-      <div><label>Nom d'utilisateur</label><input type="text" id="reg-user" placeholder="ex: jean_dupont" autocomplete="username"></div>
-      <div><label>Votre nom complet</label><input type="text" id="reg-name" placeholder="ex: Jean Dupont"></div>
-      <div><label>Mot de passe (min 6 car.)</label><input type="password" id="reg-pass" placeholder="••••••••" autocomplete="new-password"></div>
-      <div><label>Confirmer le mot de passe</label><input type="password" id="reg-pass2" placeholder="••••••••"></div>
-      <button class="auth-btn" id="reg-btn" onclick="doRegister()">✨ CRÉER MON COMPTE</button>
-      <div class="auth-err" id="reg-err"></div>
-    </div>
+  <div id="nav">
+    <button class="nb on"  onclick="show('home',this)">🏠 Accueil</button>
+    <button class="nb"     onclick="show('scen',this)">📝 Scénario</button>
+    <button class="nb"     onclick="show('imp', this)">📚 Import</button>
+    <button class="nb"     onclick="show('prod',this)">🎬 Production</button>
+    <button class="nb"     onclick="show('vis', this)">🖼️ Visuels</button>
+    <button class="nb"     onclick="show('mont',this)">✂️ Montage</button>
+    <button class="nb"     onclick="show('chat',this)">🤖 Assistant</button>
+    <button class="nb"     onclick="show('export',this)">📦 Produits Finaux</button>
+    <button class="nb"     onclick="show('outils',this)">🛠️ Outils</button>
+    <button class="nb"     onclick="show('cfg', this)">⚙️ Config</button>
   </div>
-  <div class="film-strip"><div class="film-cell"></div><div class="film-cell"></div><div class="film-cell"></div><div class="film-cell"></div><div class="film-cell"></div><div class="film-cell"></div><div class="film-cell"></div><div class="film-cell"></div></div>
-  <div style="font-size:.68rem;color:var(--dim);">Outils 100% gratuits · Claude AI · Stable Diffusion · DaVinci Resolve</div>
+  <div class="hdr-right">
+    <span id="ai-status-badge">IA INACTIF</span>
+    <div class="live-txt"><span class="live-dot"></span>Studio actif</div>
+  </div>
 </div>
 
-<div class="app" id="app">
-  <header>
-    <div style="cursor:pointer" onclick="goTab('tab-accueil',document.querySelectorAll('.nav-btn')[0])">
-      <div class="logo">🎬 BENY-JOE CINIE IA</div>
-      <div class="logo-sub">STUDIO PROFESSIONNEL · KHEDIM BENYAKHLEF</div>
-    </div>
-    <nav>
-      <button class="nav-btn active" onclick="goTab('tab-accueil',this)">🏠 Accueil</button>
-      <button class="nav-btn" onclick="goTab('tab-scenario',this)">📝 Scénario</button>
-      <button class="nav-btn" onclick="goTab('tab-import',this)">📚 Import</button>
-      <button class="nav-btn" onclick="goTab('tab-production',this)">🎬 Production</button>
-      <button class="nav-btn" onclick="goTab('tab-visuel',this)">🖼️ Visuels</button>
-      <button class="nav-btn" onclick="goTab('tab-montage',this)">✂️ Montage</button>
-      <button class="nav-btn" onclick="goTab('tab-assistant',this)">🤖 Assistant</button>
-      <button class="nav-btn" onclick="goTab('tab-outils',this)">🛠️ Outils</button>
-      <button class="nav-btn" onclick="goTab('tab-config',this)">⚙️ Config</button>
-    </nav>
-    <div class="header-right">
-      <span class="dot"></span>
-      <span class="user-info" id="user-display"></span>
-      <button class="logout-btn" onclick="doLogout()">Déconnexion</button>
-    </div>
-  </header>
-  <div class="main">
+<div class="main">
 
-    <!-- ACCUEIL -->
-    <div class="tab active" id="tab-accueil">
-      <div style="text-align:center;padding:1.8rem 0 1.5rem;">
-        <div style="font-size:3rem;margin-bottom:.5rem;">🎬</div>
-        <div style="font-family:'Cinzel',serif;font-size:2rem;font-weight:900;background:linear-gradient(135deg,var(--gold),var(--gold3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;">BENY-JOE CINIE IA</div>
-        <div style="color:var(--muted);letter-spacing:3px;font-size:.78rem;margin-top:.3rem;">PLATEFORME DE PRODUCTION CINÉMATOGRAPHIQUE IA</div>
-        <div class="founder-badge" style="margin-top:.5rem;">✦ Fondé par KHEDIM BENYAKHLEF dit BENY-JOE ✦</div>
-        <div style="margin-top:.9rem;display:flex;gap:.4rem;justify-content:center;flex-wrap:wrap;">
-          <span class="tag">🆓 100% Gratuit</span><span class="tag">🤖 Claude AI</span><span class="tag">🎨 Stable Diffusion</span><span class="tag">🎵 Suno AI</span><span class="tag">🎬 Runway ML</span>
-        </div>
-      </div>
-      <div class="grid4">
-        <div class="tool-card" onclick="goTab('tab-scenario',document.querySelectorAll('.nav-btn')[1])"><div class="tool-icon">📝</div><div class="tool-name">Scénario IA</div><div class="tool-desc">Génération automatique de scénarios professionnels.</div><span class="tool-badge badge-api">CLAUDE AI</span></div>
-        <div class="tool-card" onclick="goTab('tab-import',document.querySelectorAll('.nav-btn')[2])"><div class="tool-icon">📚</div><div class="tool-name">Roman → Film</div><div class="tool-desc">Adaptez un texte ou roman en scénario cinéma.</div><span class="tool-badge badge-free">GRATUIT</span></div>
-        <div class="tool-card" onclick="goTab('tab-production',document.querySelectorAll('.nav-btn')[3])"><div class="tool-icon">🎬</div><div class="tool-name">Production</div><div class="tool-desc">Plan de production complet par type de film.</div><span class="tool-badge badge-api">CLAUDE AI</span></div>
-        <div class="tool-card" onclick="goTab('tab-visuel',document.querySelectorAll('.nav-btn')[4])"><div class="tool-icon">🖼️</div><div class="tool-name">Visuels IA</div><div class="tool-desc">Prompts optimisés pour storyboards et affiches.</div><span class="tool-badge badge-free">GRATUIT</span></div>
-        <div class="tool-card" onclick="goTab('tab-montage',document.querySelectorAll('.nav-btn')[5])"><div class="tool-icon">✂️</div><div class="tool-name">Montage</div><div class="tool-desc">Timeline + conseils de montage par IA.</div><span class="tool-badge badge-free">GRATUIT</span></div>
-        <div class="tool-card" onclick="goTab('tab-assistant',document.querySelectorAll('.nav-btn')[6])"><div class="tool-icon">🤖</div><div class="tool-name">Assistant IA</div><div class="tool-desc">Coach cinéma personnel, disponible 24h/24.</div><span class="tool-badge badge-api">CLAUDE AI</span></div>
-        <div class="tool-card" onclick="goTab('tab-outils',document.querySelectorAll('.nav-btn')[7])"><div class="tool-icon">🛠️</div><div class="tool-name">Outils Gratuits</div><div class="tool-desc">Catalogue complet des meilleurs outils IA gratuits.</div><span class="tool-badge badge-free">CATALOGUE</span></div>
-        <div class="tool-card" onclick="goTab('tab-config',document.querySelectorAll('.nav-btn')[8])"><div class="tool-icon">⚙️</div><div class="tool-name">Configuration</div><div class="tool-desc">Paramètres, clés API, préférences du studio.</div><span class="tool-badge badge-free">SETUP</span></div>
-      </div>
-      <div class="card"><div class="card-title">WORKFLOW PROFESSIONNEL</div>
-        <div class="steps">
-          <div class="step active"><span style="font-size:.9rem;font-weight:700;display:block;">1</span>Synopsis</div>
-          <div class="step"><span style="font-size:.9rem;font-weight:700;display:block;">2</span>Scénario</div>
-          <div class="step"><span style="font-size:.9rem;font-weight:700;display:block;">3</span>Storyboard</div>
-          <div class="step"><span style="font-size:.9rem;font-weight:700;display:block;">4</span>Production</div>
-          <div class="step"><span style="font-size:.9rem;font-weight:700;display:block;">5</span>Visuels</div>
-          <div class="step"><span style="font-size:.9rem;font-weight:700;display:block;">6</span>Son/VO</div>
-          <div class="step"><span style="font-size:.9rem;font-weight:700;display:block;">7</span>Montage</div>
-          <div class="step"><span style="font-size:.9rem;font-weight:700;display:block;">8</span>Export</div>
-        </div>
-      </div>
+<!-- ══════════════════════ ACCUEIL ══════════════════════ -->
+<div id="tab-home" class="tab on">
+  <div class="hero">
+    <div class="hero-logo">🎬 BENY-JOE CINIE IA</div>
+    <div class="hero-sub">Plateforme de Production Cinématographique IA</div>
+    <div class="hero-author">✦ Fondé par KHEDIM BENYAKHLEF dit BENY-JOE ✦</div>
+    <div class="hero-tags">
+      <span class="tag">🆓 100% Gratuit</span>
+      <span class="tag">🤖 Groq Llama 3.3 70B</span>
+      <span class="tag">🎨 Leonardo AI</span>
+      <span class="tag">🎵 Suno AI</span>
+      <span class="tag">🎬 Runway ML</span>
+      <span class="tag">✂️ DaVinci Resolve</span>
     </div>
-
-    <!-- SCÉNARIO -->
-    <div class="tab" id="tab-scenario">
-      <div class="card"><div class="card-title">TYPE DE PRODUCTION</div>
-        <div class="type-pills" id="prod-type-pills">
-          <span class="pill active">🎬 Court Métrage</span><span class="pill">🎥 Long Métrage</span><span class="pill">🎵 Clip Musical</span><span class="pill">📹 Documentaire</span><span class="pill">🎨 Dessin Animé</span><span class="pill">📺 Série Web</span>
-        </div>
-        <div class="grid2">
-          <div><label>TITRE DU PROJET</label><input type="text" id="proj-titre" placeholder="Ex: La Dernière Lumière d'Oran"></div>
-          <div><label>GENRE</label><select id="proj-genre"><option>Drame</option><option>Thriller</option><option>Romance</option><option>Science-Fiction</option><option>Horreur</option><option>Comédie</option><option>Action</option><option>Historique</option><option>Fantastique</option><option>Documentaire</option></select></div>
-          <div><label>DURÉE</label><select id="proj-duree"><option>3 min (Clip)</option><option>15 min (Court)</option><option>30 min (Moyen)</option><option>1h30 (Long métrage)</option><option>2h+ (Épique)</option></select></div>
-          <div><label>LANGUE</label><select id="proj-langue"><option>Français</option><option>Arabe classique</option><option>Darija algérienne</option><option>Anglais</option><option>Bilingue FR/AR</option></select></div>
-        </div>
-      </div>
-      <div class="grid2">
-        <div class="card"><div class="card-title">SYNOPSIS</div>
-          <textarea id="synopsis" placeholder="Décrivez votre histoire..." style="min-height:170px;"></textarea>
-          <div style="display:flex;gap:.5rem;margin-top:.7rem;flex-wrap:wrap;">
-            <button class="btn btn-gold" onclick="genererScenario()">✨ Générer scénario</button>
-            <button class="btn btn-outline" onclick="ameliorerSynopsis()">🔧 Améliorer</button>
-          </div>
-        </div>
-        <div class="card"><div class="card-title">PERSONNAGES</div>
-          <div id="perso-list" style="display:flex;flex-direction:column;gap:.5rem;margin-bottom:.7rem;max-height:170px;overflow-y:auto;"></div>
-          <div style="display:flex;gap:.4rem;"><div style="flex:1"><input type="text" id="new-perso" placeholder="Nom, rôle..."></div><button class="btn btn-outline" onclick="ajouterPerso()">+</button></div>
-          <button class="btn btn-outline" style="margin-top:.5rem;width:100%;" onclick="genererPersonnages()">🤖 Générer depuis synopsis</button>
-        </div>
-      </div>
-      <div class="card"><div class="card-title">DÉCOUPAGE EN SCÈNES</div>
-        <div style="display:flex;gap:.5rem;margin-bottom:.9rem;flex-wrap:wrap;align-items:center;">
-          <button class="btn btn-gold" onclick="ajouterScene()">+ Nouvelle scène</button>
-          <button class="btn btn-outline" onclick="restructurerScenes()">🔄 Restructurer IA</button>
-          <button class="btn btn-outline" onclick="exporterScript()">📄 Exporter</button>
-          <span style="margin-left:auto;font-size:.75rem;color:var(--muted);" id="scenes-count">0 scène(s)</span>
-        </div>
-        <div class="scene-list" id="scenes-container"></div>
-        <div style="text-align:center;padding:1.5rem;color:var(--dim);font-size:.8rem;" id="empty-scenes">✦ Générez ou ajoutez des scènes manuellement</div>
-      </div>
+    <div id="home-key-alert" style="display:none;background:rgba(224,85,85,.08);border:1px solid rgba(224,85,85,.25);border-radius:8px;padding:.65rem 1rem;font-size:.75rem;color:var(--red);margin:.5rem auto;max-width:480px">
+      ⚠️ Clé Groq non configurée — <a href="#" onclick="show('cfg',nbAt(9))" style="color:var(--gold)">Cliquez ici pour activer l'IA</a>
     </div>
-
-    <!-- IMPORT -->
-    <div class="tab" id="tab-import">
-      <div class="card"><div class="card-title">IMPORT — ROMAN / TEXTE</div>
-        <div class="grid2">
-          <div><div class="drop-zone" onclick="document.getElementById('import-file').click()"><input type="file" id="import-file" accept=".txt,.pdf" onchange="chargerFichier(this)"><div style="font-size:2rem;margin-bottom:.4rem;">📂</div><div>Déposer un fichier ici</div><div style="font-size:.7rem;color:var(--dim);margin-top:.25rem;">TXT, PDF — Max 5MB</div></div></div>
-          <div><label>OU COLLER LE TEXTE</label><textarea id="import-text" placeholder="Collez votre texte..." style="min-height:120px;"></textarea></div>
-        </div>
-        <div class="grid2" style="margin-top:.9rem;">
-          <div><label>TYPE D'ŒUVRE</label><select id="import-type"><option>Roman classique</option><option>Roman policier</option><option>Romance</option><option>Biographie</option><option>Nouvelle</option></select></div>
-          <div><label>ADAPTER EN</label><select id="import-adapt"><option>Court métrage (15 min)</option><option>Long métrage (1h30)</option><option>Clip musical</option><option>Mini-série</option><option>Documentaire</option></select></div>
-        </div>
-        <button class="btn btn-gold" style="margin-top:.9rem;" onclick="analyserTexte()">🔍 Analyser et adapter avec IA</button>
-      </div>
-      <div class="card" id="import-result" style="display:none;"><div class="card-title">RÉSULTAT</div>
-        <div class="output-box" id="import-output"></div>
-        <div class="output-actions"><button class="btn btn-gold" onclick="importerVersScenario()">→ Vers Scénario</button><button class="btn btn-outline" onclick="copier('import-output')">📋 Copier</button></div>
-      </div>
-    </div>
-
-    <!-- PRODUCTION -->
-    <div class="tab" id="tab-production">
-      <div class="card"><div class="card-title">TYPE DE PRODUCTION</div>
-        <div class="grid3">
-          <div class="tool-card prod-type-card" id="prod-cm" onclick="selectProd('court')" style="border-color:var(--gold);background:rgba(201,168,76,.08)"><div class="tool-icon">🎬</div><div class="tool-name">Court Métrage</div><div class="tool-desc">5 à 30 min. Structure 3 actes.</div></div>
-          <div class="tool-card prod-type-card" id="prod-lm" onclick="selectProd('long')"><div class="tool-icon">🎥</div><div class="tool-name">Long Métrage</div><div class="tool-desc">1h30+. Arcs narratifs complets.</div></div>
-          <div class="tool-card prod-type-card" id="prod-clip" onclick="selectProd('clip')"><div class="tool-icon">🎵</div><div class="tool-name">Clip Musical</div><div class="tool-desc">3-5 min. Synchronisé musique.</div></div>
-          <div class="tool-card prod-type-card" id="prod-doc" onclick="selectProd('doc')"><div class="tool-icon">📹</div><div class="tool-name">Documentaire</div><div class="tool-desc">Voix off, interviews, narration.</div></div>
-          <div class="tool-card prod-type-card" id="prod-anim" onclick="selectProd('anim')"><div class="tool-icon">🎨</div><div class="tool-name">Dessin Animé</div><div class="tool-desc">Animation 2D/3D. Prompts SD.</div></div>
-          <div class="tool-card prod-type-card" id="prod-serie" onclick="selectProd('serie')"><div class="tool-icon">📺</div><div class="tool-name">Série Web</div><div class="tool-desc">Épisodes 15-45 min. Saisons.</div></div>
-        </div>
-      </div>
-      <div class="card"><div class="card-title">PARAMÈTRES</div>
-        <div class="grid2">
-          <div><label>STYLE VISUEL</label><select id="style-visuel"><option>Réaliste cinématographique (4K)</option><option>Film noir et blanc</option><option>Animation Ghibli</option><option>Anime japonais</option><option>Hyperréaliste photo</option><option>Vintage Super 8</option><option>Néonoir futuriste</option></select></div>
-          <div><label>RATIO</label><select id="ratio"><option>16:9 (YouTube/TV)</option><option>2.39:1 (Cinémascope)</option><option>9:16 (TikTok/Reels)</option><option>1:1 (Carré)</option></select></div>
-          <div><label>PALETTE</label><select id="palette"><option>Naturel</option><option>Chaud et doré</option><option>Froid et bleu</option><option>Désaturé dramatique</option><option>Teal & Orange</option></select></div>
-          <div><label>LANGUE DIALOGUES</label><select id="langue-prod"><option>Français</option><option>Arabe classique</option><option>Darija algérienne</option><option>Anglais</option><option>Bilingue</option></select></div>
-        </div>
-        <hr class="fancy">
-        <label>CRITÈRES SPÉCIAUX</label>
-        <textarea id="prod-criteres" placeholder="Ambiance, références de films, contraintes..."></textarea>
-        <div style="display:flex;gap:.5rem;margin-top:.9rem;flex-wrap:wrap;">
-          <button class="btn btn-gold" onclick="lancerProduction()">🎬 Générer plan de production</button>
-          <button class="btn btn-outline" onclick="genererPrompts()">📸 Prompts visuels</button>
-          <button class="btn btn-outline" onclick="genererVoixOff()">🎙️ Voix off</button>
-        </div>
-      </div>
-      <div class="card" id="prod-output-card" style="display:none;"><div class="card-title">PLAN DE PRODUCTION IA</div>
-        <div class="progress-bar"><div class="progress-fill" id="prod-progress"></div></div>
-        <div class="output-box" id="prod-output"></div>
-        <div class="output-actions">
-          <button class="btn btn-gold" onclick="goTab('tab-montage',document.querySelectorAll('.nav-btn')[5])">→ Montage</button>
-          <button class="btn btn-outline" onclick="copier('prod-output')">📋 Copier</button>
-          <button class="btn btn-outline" onclick="exporterTxt('prod-output','plan_production.txt')">💾 Exporter</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- VISUELS -->
-    <div class="tab" id="tab-visuel">
-      <div class="card"><div class="card-title">GÉNÉRATEUR DE PROMPTS VISUELS</div>
-        <div class="grid2">
-          <div>
-            <label>DESCRIPTION DE LA SCÈNE</label>
-            <textarea id="vis-desc" placeholder="Ex: Plan large d'une médina algérienne au coucher du soleil..." style="min-height:100px;"></textarea>
-            <label style="margin-top:.6rem;">STYLE</label>
-            <select id="vis-style"><option>Réaliste photoréaliste (SD XL)</option><option>Film cinéma 35mm</option><option>Peinture numérique</option><option>Concept art</option><option>Anime/Manga</option><option>Cartoon 3D Pixar</option><option>Photo vintage</option></select>
-            <button class="btn btn-gold" style="margin-top:.7rem;width:100%;" onclick="genererPromptVisuel()">✨ Générer prompt</button>
-          </div>
-          <div>
-            <label>PROMPT GÉNÉRÉ</label>
-            <div class="output-box" id="vis-prompt" style="min-height:120px;">En attente...</div>
-            <div class="output-actions" style="margin-top:.5rem;">
-              <button class="btn btn-outline" onclick="copier('vis-prompt')">📋 Copier</button>
-              <button class="btn btn-outline" onclick="window.open('https://leonardo.ai','_blank')">→ Leonardo AI</button>
-              <button class="btn btn-outline" onclick="window.open('https://www.bing.com/images/create','_blank')">→ Bing Creator</button>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card"><div class="card-title">STORYBOARD AUTOMATIQUE</div>
-        <button class="btn btn-gold" onclick="genererStoryboard()">🎨 Générer storyboard complet</button>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:1rem;margin-top:1rem;" id="storyboard-grid"></div>
-      </div>
-    </div>
-
-    <!-- MONTAGE -->
-    <div class="tab" id="tab-montage">
-      <div class="card"><div class="card-title">TIMELINE — MONTAGE</div>
-        <div style="margin-bottom:.5rem;"><div style="font-size:.7rem;color:var(--muted);margin-bottom:.3rem;">▶ VIDÉO</div><div class="timeline"><div style="display:flex;gap:2px;flex:1;" id="timeline-video"></div></div></div>
-        <div><div style="font-size:.7rem;color:var(--muted);margin-bottom:.3rem;">🎵 AUDIO</div><div class="timeline"><div style="display:flex;gap:2px;flex:1;" id="timeline-audio"></div></div></div>
-        <div style="display:flex;gap:.5rem;margin-top:.9rem;">
-          <button class="btn btn-outline" onclick="ajouterClip()">+ Clip vidéo</button>
-          <button class="btn btn-outline" onclick="ajouterMusique()">+ Musique</button>
-          <button class="btn btn-gold" onclick="genererMontage()">🤖 Conseils montage IA</button>
-        </div>
-      </div>
-      <div class="card"><div class="card-title">RECOMMANDATIONS IA</div>
-        <div class="output-box" id="montage-suggestions">Cliquez sur "Conseils montage IA" pour des recommandations.</div>
-        <div class="output-actions">
-          <button class="btn btn-outline" onclick="copier('montage-suggestions')">📋 Copier</button>
-          <button class="btn btn-outline" onclick="exporterTxt('montage-suggestions','plan_montage.txt')">💾 Exporter</button>
-          <button class="btn btn-outline" onclick="window.open('https://www.blackmagicdesign.com/fr/products/davinciresolve','_blank')">→ DaVinci Resolve</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ASSISTANT -->
-    <div class="tab" id="tab-assistant">
-      <div class="card"><div class="card-title">🤖 BENY-JOE CINIE IA — ASSISTANT</div>
-        <div class="type-pills" id="mode-pills">
-          <span class="pill active">Conversation libre</span><span class="pill">Scénario & Écriture</span><span class="pill">Réalisation technique</span><span class="pill">Production & Budget</span><span class="pill">Montage & Post-prod</span><span class="pill">Festivals & Distribution</span>
-        </div>
-        <div class="chat-messages" id="chat-box">
-          <div class="msg msg-ai"><div class="msg-name">🎬 BENY-JOE CINIE IA</div>Bonjour ! Je suis votre assistant cinéma professionnel, fondé par KHEDIM BENYAKHLEF dit BENY-JOE. Comment puis-je vous aider ?</div>
-        </div>
-        <div class="chat-row">
-          <input type="text" id="chat-input" placeholder="Posez votre question cinéma...">
-          <button class="btn btn-gold" onclick="envoyerMessage()">Envoyer</button>
-          <button class="btn btn-outline" onclick="effacerChat()">🗑️</button>
-        </div>
-        <div style="margin-top:.7rem;display:flex;gap:.35rem;flex-wrap:wrap;">
-          <button class="btn btn-outline" style="font-size:.7rem;padding:.28rem .6rem;" onclick="quickPrompt('Comment améliorer mon scénario ?')">Améliorer scénario</button>
-          <button class="btn btn-outline" style="font-size:.7rem;padding:.28rem .6rem;" onclick="quickPrompt('Quels angles de caméra pour une scène dramatique ?')">Angles caméra</button>
-          <button class="btn btn-outline" style="font-size:.7rem;padding:.28rem .6rem;" onclick="quickPrompt('Comment financer un court métrage indépendant ?')">Financement</button>
-          <button class="btn btn-outline" style="font-size:.7rem;padding:.28rem .6rem;" onclick="quickPrompt('Les meilleurs festivals cinéma indépendant ?')">Festivals</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- OUTILS -->
-    <div class="tab" id="tab-outils">
-      <div class="card"><div class="card-title">📸 IMAGES IA — GRATUIT</div>
-        <div class="grid3">
-          <div class="tool-card" onclick="window.open('https://leonardo.ai','_blank')"><div class="tool-icon">🎨</div><div class="tool-name">Leonardo AI</div><div class="tool-desc">150 générations/jour gratuites. Qualité cinéma.</div><span class="tool-badge badge-free">150/JOUR</span></div>
-          <div class="tool-card" onclick="window.open('https://www.bing.com/images/create','_blank')"><div class="tool-icon">🖼️</div><div class="tool-name">Bing Image Creator</div><div class="tool-desc">DALL-E 3 gratuit. Illimité avec compte Microsoft.</div><span class="tool-badge badge-free">ILLIMITÉ</span></div>
-          <div class="tool-card" onclick="window.open('https://huggingface.co/spaces/stabilityai/stable-diffusion','_blank')"><div class="tool-icon">🤗</div><div class="tool-name">HuggingFace SD</div><div class="tool-desc">Stable Diffusion XL en ligne, sans installation.</div><span class="tool-badge badge-free">GRATUIT</span></div>
-        </div>
-      </div>
-      <div class="card"><div class="card-title">🎬 VIDÉO IA</div>
-        <div class="grid3">
-          <div class="tool-card" onclick="window.open('https://runwayml.com','_blank')"><div class="tool-icon">🎥</div><div class="tool-name">Runway ML</div><div class="tool-desc">125 crédits gratuits/mois. Gen-3 haute qualité.</div><span class="tool-badge badge-free">125 CRÉDITS</span></div>
-          <div class="tool-card" onclick="window.open('https://klingai.com','_blank')"><div class="tool-icon">🎞️</div><div class="tool-name">Kling AI</div><div class="tool-desc">Vidéos 10 sec, qualité cinématographique.</div><span class="tool-badge badge-free">PLAN GRATUIT</span></div>
-          <div class="tool-card" onclick="window.open('https://pika.art','_blank')"><div class="tool-icon">⚡</div><div class="tool-name">Pika Labs</div><div class="tool-desc">Animations et effets spéciaux IA rapides.</div><span class="tool-badge badge-free">PLAN GRATUIT</span></div>
-        </div>
-      </div>
-      <div class="card"><div class="card-title">🎵 MUSIQUE & SON</div>
-        <div class="grid3">
-          <div class="tool-card" onclick="window.open('https://suno.ai','_blank')"><div class="tool-icon">🎵</div><div class="tool-name">Suno AI</div><div class="tool-desc">50 chansons originales/jour gratuitement.</div><span class="tool-badge badge-free">50/JOUR</span></div>
-          <div class="tool-card" onclick="window.open('https://udio.com','_blank')"><div class="tool-icon">🎹</div><div class="tool-name">Udio</div><div class="tool-desc">Musique IA haute qualité. Plan gratuit disponible.</div><span class="tool-badge badge-free">PLAN GRATUIT</span></div>
-          <div class="tool-card" onclick="window.open('https://elevenlabs.io','_blank')"><div class="tool-icon">🎙️</div><div class="tool-name">ElevenLabs</div><div class="tool-desc">Voix off ultra-réaliste. 10 000 caractères/mois.</div><span class="tool-badge badge-free">10K/MOIS</span></div>
-        </div>
-      </div>
-      <div class="card"><div class="card-title">✂️ MONTAGE — 100% GRATUIT</div>
-        <div class="grid3">
-          <div class="tool-card" onclick="window.open('https://www.blackmagicdesign.com/fr/products/davinciresolve','_blank')"><div class="tool-icon">🎞️</div><div class="tool-name">DaVinci Resolve</div><div class="tool-desc">Montage professionnel Hollywood. Version gratuite complète.</div><span class="tool-badge badge-free">100% GRATUIT</span></div>
-          <div class="tool-card" onclick="window.open('https://kdenlive.org','_blank')"><div class="tool-icon">✂️</div><div class="tool-name">Kdenlive</div><div class="tool-desc">Open source professionnel. Multi-piste, effets.</div><span class="tool-badge badge-free">OPEN SOURCE</span></div>
-          <div class="tool-card" onclick="window.open('https://www.openshot.org','_blank')"><div class="tool-icon">🎬</div><div class="tool-name">OpenShot</div><div class="tool-desc">Simple et puissant. Idéal indépendants.</div><span class="tool-badge badge-free">GRATUIT</span></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- CONFIG -->
-    <div class="tab" id="tab-config">
-      <div class="card"><div class="card-title">INFORMATIONS DU STUDIO</div>
-        <div style="font-size:.83rem;line-height:1.9;">
-          <div>🎬 <strong style="color:var(--gold)">BENY-JOE CINIE IA</strong> — Studio de Production Cinématographique</div>
-          <div>✦ <strong>Fondé par</strong> KHEDIM BENYAKHLEF dit BENY-JOE</div>
-          <div>🔒 Clé API : stockée <strong>uniquement côté serveur</strong> (variable d'environnement)</div>
-          <div style="margin-top:.5rem;" id="key-status-info">⏳ Vérification...</div>
-        </div>
-      </div>
-      <div class="card" id="admin-section" style="display:none;"><div class="card-title">🔑 CLÉ API — ADMIN</div>
-        <p style="font-size:.8rem;color:var(--muted);margin-bottom:.9rem;">La clé est stockée <strong>uniquement sur le serveur</strong>. Elle n'est jamais transmise au navigateur.<br>Obtenez votre clé : <a href="https://console.anthropic.com" target="_blank" style="color:var(--gold);">console.anthropic.com</a></p>
-        <div style="display:flex;gap:.5rem;align-items:flex-end;">
-          <div style="flex:1"><label>CLÉ API ANTHROPIC</label><input type="password" id="key-admin" placeholder="sk-ant-..."></div>
-          <button class="btn btn-gold" onclick="sauvegarderCle()">🔒 Sauvegarder</button>
-        </div>
-      </div>
-      <div class="card"><div class="card-title">PRÉFÉRENCES</div>
-        <div class="settings-row"><div class="settings-label">Sauvegarde automatique<div class="settings-hint">Sauvegarder le projet toutes les 5 min</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
-        <div class="settings-row" style="border:none;"><div class="settings-label">Notifications<div class="settings-hint">Alertes à chaque génération IA</div></div><div class="toggle" onclick="this.classList.toggle('on')"></div></div>
-      </div>
-    </div>
-
   </div>
-  <footer>🎬 BENY-JOE CINIE IA · Fondé par <span style="color:var(--gold)">KHEDIM BENYAKHLEF dit BENY-JOE</span> · Studio de Production Cinématographique IA</footer>
+
+  <div class="g4" style="margin-bottom:1.2rem">
+    <div class="tc" onclick="show('scen',nbAt(1))"><div class="tc-icon">📝</div><div class="tc-name">Scénario IA</div><div class="tc-desc">Générez scénarios complets, personnages, dialogues.</div><span class="badge badge-blu">GROQ AI</span></div>
+    <div class="tc" onclick="show('imp',nbAt(2))"><div class="tc-icon">📚</div><div class="tc-name">Roman → Film</div><div class="tc-desc">Adaptez n'importe quel texte en scénario cinéma.</div><span class="badge badge-grn">GRATUIT</span></div>
+    <div class="tc" onclick="show('prod',nbAt(3))"><div class="tc-icon">🎬</div><div class="tc-name">Production IA</div><div class="tc-desc">Plan de production complet par type de projet.</div><span class="badge badge-blu">GROQ AI</span></div>
+    <div class="tc" onclick="show('vis',nbAt(4))"><div class="tc-icon">🖼️</div><div class="tc-name">Visuels & Storyboard</div><div class="tc-desc">Prompts SD XL optimisés + storyboard automatique.</div><span class="badge badge-grn">GRATUIT</span></div>
+    <div class="tc" onclick="show('mont',nbAt(5))"><div class="tc-icon">✂️</div><div class="tc-name">Montage IA</div><div class="tc-desc">Timeline interactive + conseils de montage pro.</div><span class="badge badge-grn">GRATUIT</span></div>
+    <div class="tc" onclick="show('chat',nbAt(6))"><div class="tc-icon">🤖</div><div class="tc-name">Assistant IA</div><div class="tc-desc">Coach cinéma professionnel disponible 24h/24.</div><span class="badge badge-blu">GROQ AI</span></div>
+    <div class="tc" onclick="show('export',nbAt(7))"><div class="tc-icon">📦</div><div class="tc-name">Produits Finaux</div><div class="tc-desc">Visualisez et téléchargez tous vos productions.</div><span class="badge badge-gold">NOUVEAU</span></div>
+    <div class="tc" onclick="show('outils',nbAt(8))"><div class="tc-icon">🛠️</div><div class="tc-name">Outils IA Gratuits</div><div class="tc-desc">Catalogue complet des meilleurs outils cinéma IA.</div><span class="badge badge-grn">CATALOGUE</span></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">WORKFLOW COMPLET — 8 ÉTAPES</div>
+    <div class="step-bar">
+      <div class="step-item on">1 · Synopsis</div>
+      <div class="step-item">2 · Scénario</div>
+      <div class="step-item">3 · Storyboard</div>
+      <div class="step-item">4 · Production</div>
+      <div class="step-item">5 · Visuels IA</div>
+      <div class="step-item">6 · Voix / Son</div>
+      <div class="step-item">7 · Montage</div>
+      <div class="step-item">8 · Export Final</div>
+    </div>
+    <p style="font-size:.77rem;color:var(--mu)">Workflow complet de A à Z. Propulsé par <strong style="color:var(--gold)">Google Groq Llama 3.3 70B</strong> — le modèle IA le plus rapide et gratuit. 1500 requêtes/jour sans carte bancaire.</p>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div class="card-hd">STATISTIQUES DU PROJET</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem">
+        <div style="background:#040a14;border-radius:8px;padding:.8rem;text-align:center"><div style="font-size:1.6rem;font-weight:900;color:var(--gold)" id="stat-scenes">0</div><div style="font-size:.65rem;color:var(--mu)">Scènes</div></div>
+        <div style="background:#040a14;border-radius:8px;padding:.8rem;text-align:center"><div style="font-size:1.6rem;font-weight:900;color:var(--blu)" id="stat-exports">0</div><div style="font-size:.65rem;color:var(--mu)">Exports</div></div>
+        <div style="background:#040a14;border-radius:8px;padding:.8rem;text-align:center"><div style="font-size:1.6rem;font-weight:900;color:var(--grn)" id="stat-clips">0</div><div style="font-size:.65rem;color:var(--mu)">Clips timeline</div></div>
+        <div style="background:#040a14;border-radius:8px;padding:.8rem;text-align:center"><div style="font-size:1.6rem;font-weight:900;color:var(--pur)" id="stat-msgs">0</div><div style="font-size:.65rem;color:var(--mu)">Messages IA</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-hd">PROJET EN COURS</div>
+      <div style="font-size:.82rem;margin-bottom:.45rem">
+        <span style="color:var(--mu)">Titre :</span>
+        <span id="home-titre" style="color:var(--gold);font-weight:700">—</span>
+      </div>
+      <div style="font-size:.82rem;margin-bottom:.45rem">
+        <span style="color:var(--mu)">Type :</span>
+        <span id="home-type" style="color:var(--tx)">—</span>
+      </div>
+      <div style="font-size:.82rem;margin-bottom:.9rem">
+        <span style="color:var(--mu)">Modèle IA :</span>
+        <span style="color:var(--grn)">Groq Llama 3.3 70B ✓</span>
+      </div>
+      <button class="btn btn-gold btn-full" onclick="show('scen',nbAt(1))">▶ Commencer le projet</button>
+    </div>
+  </div>
 </div>
 
-<div class="notif" id="notif"></div>
+<!-- ══════════════════════ SCÉNARIO ══════════════════════ -->
+<div id="tab-scen" class="tab">
+  <div class="card">
+    <div class="card-hd">TYPE DE PRODUCTION</div>
+    <div class="pills" id="type-pills">
+      <span class="pill on">🎬 Court Métrage</span>
+      <span class="pill">🎥 Long Métrage</span>
+      <span class="pill">🎵 Clip Musical</span>
+      <span class="pill">📹 Documentaire</span>
+      <span class="pill">🎨 Dessin Animé</span>
+      <span class="pill">📺 Série Web</span>
+    </div>
+    <div class="g2">
+      <div>
+        <label>TITRE DU PROJET</label>
+        <input id="titre" type="text" placeholder="Ex: La Dernière Lumière d'Oran" oninput="updateHomeStats()">
+      </div>
+      <div>
+        <label>GENRE CINÉMATOGRAPHIQUE</label>
+        <select id="genre">
+          <option>Drame</option><option>Thriller</option><option>Romance</option>
+          <option>Science-Fiction</option><option>Horreur</option><option>Comédie</option>
+          <option>Action / Aventure</option><option>Historique</option><option>Fantastique</option>
+          <option>Policier</option><option>Biopic</option>
+        </select>
+      </div>
+      <div>
+        <label>DURÉE CIBLE</label>
+        <select id="duree">
+          <option>3 min (Clip)</option>
+          <option>15 min (Court métrage)</option>
+          <option>30 min (Moyen métrage)</option>
+          <option>1h30 (Long métrage)</option>
+          <option>2h+ (Épopée cinéma)</option>
+        </select>
+      </div>
+      <div>
+        <label>LANGUE DES DIALOGUES</label>
+        <select id="langue">
+          <option>Français</option>
+          <option>Arabe classique (فصحى)</option>
+          <option>Darija algérienne (دارجة)</option>
+          <option>Anglais</option>
+          <option>Bilingue Français/Arabe</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="g2">
+    <div class="card">
+      <div class="card-hd">SYNOPSIS</div>
+      <textarea id="synopsis" placeholder="Décrivez votre histoire en quelques phrases — lieu, époque, protagoniste, conflit principal..." style="min-height:170px"></textarea>
+      <div style="display:flex;gap:.4rem;margin-top:.65rem;flex-wrap:wrap">
+        <button class="btn btn-gold" onclick="genScenario()">✨ Générer scénario complet</button>
+        <button class="btn btn-out" onclick="ameliorerSynopsis()">🔧 Améliorer synopsis</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-hd">PERSONNAGES</div>
+      <div id="perso-list" style="display:flex;flex-direction:column;gap:.42rem;margin-bottom:.65rem;max-height:155px;overflow-y:auto"></div>
+      <div style="display:flex;gap:.38rem">
+        <input id="new-perso" type="text" placeholder="Nom, rôle, trait dominant..." style="flex:1">
+        <button class="btn btn-out" onclick="addPerso()">+ Ajouter</button>
+      </div>
+      <button class="btn btn-out btn-full" style="margin-top:.48rem" onclick="genPersonnages()">🤖 Générer depuis synopsis</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">DÉCOUPAGE EN SCÈNES</div>
+    <div style="display:flex;gap:.4rem;margin-bottom:.85rem;flex-wrap:wrap;align-items:center">
+      <button class="btn btn-gold" onclick="addScene()">+ Nouvelle scène</button>
+      <button class="btn btn-out" onclick="restructurer()">🔄 Restructurer (IA)</button>
+      <button class="btn btn-out" onclick="genDialogues()">💬 Générer dialogues</button>
+      <button class="btn btn-grn" onclick="exportScript()">💾 Exporter script .txt</button>
+      <span id="scene-count" style="margin-left:auto;font-size:.72rem;color:var(--mu)">0 scène(s)</span>
+    </div>
+    <div id="scene-list"></div>
+    <div id="scene-empty" style="text-align:center;padding:1.8rem;color:var(--dim);font-size:.78rem">
+      ✦ Cliquez "Générer scénario complet" ou ajoutez des scènes manuellement
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ IMPORT ══════════════════════ -->
+<div id="tab-imp" class="tab">
+  <div class="card">
+    <div class="card-hd">IMPORT — ROMAN / NOUVELLE / ARTICLE</div>
+    <p style="font-size:.8rem;color:var(--mu);margin-bottom:1rem">Importez un texte : l'IA analyse la structure, extrait les scènes-clés, les personnages et les dialogues puis génère un scénario adapté.</p>
+    <div class="g2">
+      <div>
+        <div class="dz" onclick="document.getElementById('imp-file').click()">
+          <input type="file" id="imp-file" accept=".txt" onchange="loadFile(this)">
+          <div style="font-size:2rem;margin-bottom:.5rem">📂</div>
+          <div style="font-weight:700">Déposer un fichier .txt</div>
+          <div style="font-size:.68rem;color:var(--dim);margin-top:.25rem">Fichier texte — Max 5 MB</div>
+        </div>
+      </div>
+      <div>
+        <label>OU COLLEZ LE TEXTE DIRECTEMENT</label>
+        <textarea id="imp-text" placeholder="Collez ici votre roman, nouvelle, article, biographie..." style="min-height:130px"></textarea>
+      </div>
+    </div>
+    <div class="g2" style="margin-top:.9rem">
+      <div>
+        <label>TYPE D'ŒUVRE ORIGINALE</label>
+        <select id="imp-type">
+          <option>Roman classique</option><option>Roman policier / Thriller</option>
+          <option>Romance</option><option>Biographie / Autobiographie</option>
+          <option>Nouvelle</option><option>Article journalistique</option>
+          <option>Histoire vraie / Fait divers</option>
+        </select>
+      </div>
+      <div>
+        <label>ADAPTER EN</label>
+        <select id="imp-adapt">
+          <option>Court métrage (15 min)</option>
+          <option>Long métrage (1h30)</option>
+          <option>Clip musical (3 min)</option>
+          <option>Mini-série (3 épisodes)</option>
+          <option>Documentaire</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn btn-gold" style="margin-top:.9rem" onclick="analyserTexte()">🔍 Analyser et adapter avec IA</button>
+  </div>
+  <div id="imp-result" class="card" style="display:none">
+    <div class="card-hd">RÉSULTAT DE L'ADAPTATION</div>
+    <div class="out-box" id="imp-out">En attente...</div>
+    <div class="out-actions">
+      <button class="btn btn-gold" onclick="impVersScenario()">→ Envoyer vers Scénario</button>
+      <button class="btn btn-out" onclick="copier('imp-out')">📋 Copier</button>
+      <button class="btn btn-grn" onclick="sauvegarderProduit('imp-out','Adaptation','adaptation')">💾 Sauvegarder</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ PRODUCTION ══════════════════════ -->
+<div id="tab-prod" class="tab">
+  <div class="card">
+    <div class="card-hd">TYPE DE PRODUCTION</div>
+    <div class="g3">
+      <div class="tc sel" id="pt-court" onclick="selProd('court',this)"><div class="tc-icon">🎬</div><div class="tc-name">Court Métrage</div><div class="tc-desc">5 à 30 min · Festivals · Structure 3 actes.</div></div>
+      <div class="tc" id="pt-long"  onclick="selProd('long',this)"><div class="tc-icon">🎥</div><div class="tc-name">Long Métrage</div><div class="tc-desc">1h30+ · Arcs narratifs complexes · Cinéma.</div></div>
+      <div class="tc" id="pt-clip"  onclick="selProd('clip',this)"><div class="tc-icon">🎵</div><div class="tc-name">Clip Musical</div><div class="tc-desc">3-5 min · Sync musicale · Énergie visuelle.</div></div>
+      <div class="tc" id="pt-doc"   onclick="selProd('doc',this)"><div class="tc-icon">📹</div><div class="tc-name">Documentaire</div><div class="tc-desc">Voix off · Interviews · Narration réelle.</div></div>
+      <div class="tc" id="pt-anim"  onclick="selProd('anim',this)"><div class="tc-icon">🎨</div><div class="tc-name">Dessin Animé</div><div class="tc-desc">Animation 2D/3D · Prompts SD optimisés.</div></div>
+      <div class="tc" id="pt-serie" onclick="selProd('serie',this)"><div class="tc-icon">📺</div><div class="tc-name">Série Web</div><div class="tc-desc">Épisodes 15-45 min · Arcs saisonniers.</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">PARAMÈTRES CINÉMATOGRAPHIQUES</div>
+    <div class="g2">
+      <div>
+        <label>STYLE VISUEL</label>
+        <select id="style">
+          <option>Réaliste cinématographique 4K HDR</option>
+          <option>Film noir et blanc classique</option>
+          <option>Animation Studio Ghibli</option>
+          <option>Anime japonais moderne</option>
+          <option>Hyperréaliste photo</option>
+          <option>Vintage Super 8 / 16mm</option>
+          <option>Néonoir futuriste</option>
+          <option>Documentaire cinéma-vérité</option>
+          <option>Expressionnisme allemand</option>
+        </select>
+      </div>
+      <div>
+        <label>FORMAT / RATIO D'IMAGE</label>
+        <select id="ratio">
+          <option>16:9 — YouTube / Streaming</option>
+          <option>2.39:1 — Cinémascope</option>
+          <option>1.85:1 — Standard cinéma</option>
+          <option>9:16 — TikTok / Reels</option>
+          <option>1:1 — Instagram carré</option>
+          <option>4:3 — Format classique</option>
+        </select>
+      </div>
+      <div>
+        <label>PALETTE DE COULEURS (COLOR GRADING)</label>
+        <select id="palette">
+          <option>Naturel (aucun filtre)</option>
+          <option>Chaud et doré (cinéma romantique)</option>
+          <option>Froid et bleuté (thriller polar)</option>
+          <option>Désaturé (film dramatique)</option>
+          <option>Teal &amp; Orange (blockbuster)</option>
+          <option>Sépia vintage (reconstitution historique)</option>
+          <option>High contrast noir (expressionniste)</option>
+        </select>
+      </div>
+      <div>
+        <label>LANGUE DES DIALOGUES</label>
+        <select id="lang-prod">
+          <option>Français</option>
+          <option>Arabe classique</option>
+          <option>Darija algérienne</option>
+          <option>Anglais</option>
+          <option>Bilingue FR/AR</option>
+        </select>
+      </div>
+    </div>
+    <hr class="hr">
+    <label>NOTES DE RÉALISATION / CRITÈRES SPÉCIAUX</label>
+    <textarea id="criteres" placeholder="Ambiance souhaitée, références de films (ex: style Kubrick), effets spéciaux, public cible, contraintes de budget..."></textarea>
+    <div style="display:flex;gap:.42rem;margin-top:.8rem;flex-wrap:wrap">
+      <button class="btn btn-gold" onclick="lancerProd()">🎬 Générer le plan de production</button>
+      <button class="btn btn-out" onclick="genPromptsProd()">📸 Prompts visuels par scène</button>
+      <button class="btn btn-out" onclick="genVoixOff()">🎙️ Générer narration / voix off</button>
+      <button class="btn btn-out" onclick="genFiche()">📋 Fiche technique</button>
+    </div>
+  </div>
+
+  <div id="prod-card" class="card" style="display:none">
+    <div class="card-hd" id="prod-card-title">PLAN DE PRODUCTION IA</div>
+    <div class="pb-wrap"><div class="pb-fill" id="prod-pb"></div></div>
+    <div class="out-box" id="prod-out">Génération en cours...</div>
+    <div class="out-actions">
+      <button class="btn btn-gold" onclick="show('mont',nbAt(5))">→ Envoyer au Montage</button>
+      <button class="btn btn-out" onclick="copier('prod-out')">📋 Copier</button>
+      <button class="btn btn-grn" onclick="sauvegarderProduit('prod-out','Plan de production','plan_production')">💾 Sauvegarder</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ VISUELS ══════════════════════ -->
+<div id="tab-vis" class="tab">
+  <div class="card">
+    <div class="card-hd">GÉNÉRATEUR DE PROMPTS VISUELS</div>
+    <p style="font-size:.78rem;color:var(--mu);margin-bottom:.9rem">Prompts ultra-optimisés pour Leonardo AI, Bing Image Creator, Stable Diffusion XL — tous 100% gratuits.</p>
+    <div class="g2">
+      <div>
+        <label>DESCRIPTION DE LA SCÈNE</label>
+        <textarea id="vis-desc" placeholder="Ex: Plan large d'une médina algérienne au coucher du soleil — ruelles en pierre, lumière dorée, vieilles portes en bois..."style="min-height:105px"></textarea>
+        <label style="margin-top:.55rem">STYLE CIBLE</label>
+        <select id="vis-style">
+          <option>Réaliste photoréaliste (SD XL)</option>
+          <option>Film 35mm cinématographique</option>
+          <option>Peinture numérique épique</option>
+          <option>Concept art professionnel</option>
+          <option>Anime / Manga japonais</option>
+          <option>Cartoon 3D Pixar style</option>
+          <option>Aquarelle artistique</option>
+          <option>Photographie vintage argentique</option>
+          <option>Dessin au crayon hyperréaliste</option>
+        </select>
+        <button class="btn btn-gold btn-full" style="margin-top:.65rem" onclick="genPromptVisuel()">✨ Générer prompt optimisé</button>
+      </div>
+      <div>
+        <label>PROMPT GÉNÉRÉ (ANGLAIS + NÉGATIF)</label>
+        <div class="out-box" id="vis-out" style="min-height:120px">En attente de génération...</div>
+        <div class="out-actions">
+          <button class="btn btn-out" onclick="copier('vis-out')">📋 Copier</button>
+          <button class="btn btn-out btn-sm" onclick="window.open('https://leonardo.ai','_blank')">→ Leonardo</button>
+          <button class="btn btn-out btn-sm" onclick="window.open('https://www.bing.com/images/create','_blank')">→ Bing</button>
+          <button class="btn btn-grn btn-sm" onclick="sauvegarderProduit('vis-out','Prompt Visuel','prompt_visuel')">💾</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">STORYBOARD AUTOMATIQUE IA</div>
+    <p style="font-size:.78rem;color:var(--mu);margin-bottom:.8rem">Génère un prompt image professionnel pour chaque scène de votre scénario. Utilisez ensuite Leonardo AI ou Bing Image Creator.</p>
+    <div style="display:flex;gap:.42rem;flex-wrap:wrap;margin-bottom:1rem">
+      <button class="btn btn-gold" onclick="genStoryboard()">🎨 Générer storyboard complet</button>
+      <button class="btn btn-out" onclick="exportStoryboard()">💾 Exporter storyboard .txt</button>
+    </div>
+    <div id="sb-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.9rem"></div>
+    <div id="sb-empty" style="text-align:center;padding:1.5rem;color:var(--dim);font-size:.78rem">Ajoutez des scènes dans l'onglet Scénario, puis cliquez "Générer storyboard"</div>
+  </div>
+</div>
+
+<!-- ══════════════════════ MONTAGE ══════════════════════ -->
+<div id="tab-mont" class="tab">
+  <div class="card">
+    <div class="card-hd">TIMELINE — MONTAGE PROFESSIONNEL</div>
+    <p style="font-size:.78rem;color:var(--mu);margin-bottom:.9rem">Organisez vos clips. Exportez ensuite vers <strong style="color:var(--gold)">DaVinci Resolve</strong> (100% gratuit) pour le montage final.</p>
+
+    <div style="margin-bottom:.75rem">
+      <div class="tl-lbl">▶ PISTE VIDÉO</div>
+      <div class="tl-track" id="tl-video"><span style="color:var(--dim);font-size:.72rem;padding:.3rem">Aucun clip — cliquez "+ Clip vidéo"</span></div>
+    </div>
+    <div style="margin-bottom:.75rem">
+      <div class="tl-lbl">🎵 PISTE AUDIO</div>
+      <div class="tl-track" id="tl-audio"><span style="color:var(--dim);font-size:.72rem;padding:.3rem">Aucune piste — cliquez "+ Musique"</span></div>
+    </div>
+    <div style="margin-bottom:.75rem">
+      <div class="tl-lbl">🎙️ PISTE VOIX OFF</div>
+      <div class="tl-track" id="tl-vo"><span style="color:var(--dim);font-size:.72rem;padding:.3rem">Aucune voix — cliquez "+ Voix Off"</span></div>
+    </div>
+
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.8rem">
+      <button class="btn btn-gold" onclick="addClip()">+ Clip vidéo</button>
+      <button class="btn btn-out" onclick="addMusic()">+ Musique</button>
+      <button class="btn btn-out" onclick="addVO()">+ Voix Off</button>
+      <button class="btn btn-out" onclick="clearTimeline()">🗑️ Vider timeline</button>
+      <button class="btn btn-grn" onclick="genMontage()">🤖 Conseils de montage IA</button>
+      <span id="clip-count" style="margin-left:auto;font-size:.72rem;color:var(--mu)"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">RECOMMANDATIONS DE MONTAGE IA</div>
+    <div class="out-box" id="mont-out">Cliquez "Conseils de montage IA" pour recevoir des recommandations personnalisées basées sur votre projet.</div>
+    <div class="out-actions">
+      <button class="btn btn-out" onclick="copier('mont-out')">📋 Copier</button>
+      <button class="btn btn-grn" onclick="sauvegarderProduit('mont-out','Plan de montage','plan_montage')">💾 Sauvegarder</button>
+      <button class="btn btn-out" onclick="window.open('https://www.blackmagicdesign.com/fr/products/davinciresolve','_blank')">→ DaVinci Resolve (gratuit)</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ CHAT ══════════════════════ -->
+<div id="tab-chat" class="tab">
+  <div class="card">
+    <div class="card-hd">🤖 BENY-JOE CINIE IA — ASSISTANT PERSONNEL</div>
+    <div style="margin-bottom:.75rem">
+      <label>MODE DE DISCUSSION</label>
+      <div class="pills" id="mode-pills">
+        <span class="pill on">💬 Conversation libre</span>
+        <span class="pill">📝 Scénario & Écriture</span>
+        <span class="pill">🎥 Réalisation technique</span>
+        <span class="pill">💰 Production & Budget</span>
+        <span class="pill">✂️ Montage & Post-prod</span>
+        <span class="pill">🏆 Festivals & Distribution</span>
+        <span class="pill">📱 Réseaux sociaux</span>
+      </div>
+    </div>
+    <div class="chat-wrap" id="chat-box">
+      <div class="msg msg-ai">
+        <div class="msg-name">🎬 BENY-JOE CINIE IA — Groq Llama 3.3 70B</div>
+        Bonjour ! Je suis votre assistant cinéma professionnel, propulsé par Google Groq Llama 3.3 70B. Fondé par KHEDIM BENYAKHLEF dit BENY-JOE.<br><br>Comment puis-je vous aider dans votre production ? Scénario, réalisation, montage, distribution — je suis là pour vous.
+      </div>
+    </div>
+    <div class="chat-input-row">
+      <input type="text" id="chat-in" placeholder="Posez votre question cinéma...">
+      <button class="btn btn-gold" onclick="sendMsg()">Envoyer ↗</button>
+      <button class="btn btn-out" onclick="clearChat()">🗑️</button>
+    </div>
+    <div style="margin-top:.65rem;display:flex;gap:.3rem;flex-wrap:wrap">
+      <button class="btn btn-out btn-sm" onclick="qp('Comment améliorer la structure de mon scénario ?')">Structure scénario</button>
+      <button class="btn btn-out btn-sm" onclick="qp('Quels angles de caméra pour une scène de tension ?')">Angles caméra</button>
+      <button class="btn btn-out btn-sm" onclick="qp('Comment financer un court métrage avec 0 budget ?')">Financement</button>
+      <button class="btn btn-out btn-sm" onclick="qp('Les meilleurs festivals de cinéma indépendant en Algérie et France ?')">Festivals</button>
+      <button class="btn btn-out btn-sm" onclick="qp('Comment faire un casting professionnel sans budget ?')">Casting</button>
+      <button class="btn btn-out btn-sm" onclick="qp('Conseils pour le color grading avec DaVinci Resolve gratuit ?')">Color grading</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ PRODUITS FINAUX ══════════════════════ -->
+<div id="tab-export" class="tab">
+  <div class="card">
+    <div class="card-hd">📦 VOS PRODUCTIONS — VISUALISATION & TÉLÉCHARGEMENT</div>
+    <p style="font-size:.78rem;color:var(--mu);margin-bottom:1rem">Tous vos contenus générés avec l'IA. Visualisez, téléchargez, supprimez. Les fichiers sont sauvegardés sur le serveur.</p>
+    <div style="display:flex;gap:.42rem;flex-wrap:wrap;margin-bottom:1rem">
+      <button class="btn btn-gold" onclick="chargerExports()">🔄 Rafraîchir</button>
+      <button class="btn btn-out" onclick="exporterTout()">📥 Tout télécharger (.zip)</button>
+      <button class="btn btn-red" onclick="supprimerTout()">🗑️ Tout supprimer</button>
+    </div>
+    <div id="export-grid" class="g3">
+      <div class="product-empty" id="export-empty">
+        <div class="product-empty-icon">📂</div>
+        <div class="product-empty-txt">Aucun produit sauvegardé.<br>Générez du contenu et cliquez "💾 Sauvegarder".</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">📄 FICHIERS EXPORTÉS SUR LE SERVEUR</div>
+    <div id="export-files-list">
+      <div style="text-align:center;padding:1.5rem;color:var(--dim);font-size:.78rem">Aucun fichier exporté.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ OUTILS ══════════════════════ -->
+<div id="tab-outils" class="tab">
+  <div class="card">
+    <div class="card-hd">📸 IMAGES IA — GRATUIT</div>
+    <div class="g3">
+      <div class="tc" onclick="window.open('https://leonardo.ai','_blank')"><div class="tc-icon">🎨</div><div class="tc-name">Leonardo AI</div><div class="tc-desc">150 générations/jour. Qualité cinéma professionnelle.</div><span class="badge badge-grn">150/JOUR GRATUIT</span></div>
+      <div class="tc" onclick="window.open('https://www.bing.com/images/create','_blank')"><div class="tc-icon">🖼️</div><div class="tc-name">Bing Image Creator</div><div class="tc-desc">DALL-E 3 intégré. Illimité et gratuit.</div><span class="badge badge-grn">ILLIMITÉ GRATUIT</span></div>
+      <div class="tc" onclick="window.open('https://ideogram.ai','_blank')"><div class="tc-icon">💡</div><div class="tc-name">Ideogram AI</div><div class="tc-desc">Excellent pour texte dans les images.</div><span class="badge badge-grn">GRATUIT</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-hd">🎬 VIDÉO IA</div>
+    <div class="g3">
+      <div class="tc" onclick="window.open('https://runwayml.com','_blank')"><div class="tc-icon">🎥</div><div class="tc-name">Runway ML</div><div class="tc-desc">125 crédits/mois. Génération vidéo Gen-3.</div><span class="badge badge-grn">125 CRÉDITS/MOIS</span></div>
+      <div class="tc" onclick="window.open('https://klingai.com','_blank')"><div class="tc-icon">🎞️</div><div class="tc-name">Kling AI</div><div class="tc-desc">Vidéos 10 sec cinématographiques de haute qualité.</div><span class="badge badge-grn">PLAN GRATUIT</span></div>
+      <div class="tc" onclick="window.open('https://pika.art','_blank')"><div class="tc-icon">⚡</div><div class="tc-name">Pika Labs</div><div class="tc-desc">Animations et effets spéciaux IA.</div><span class="badge badge-grn">PLAN GRATUIT</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-hd">🎵 MUSIQUE & SON IA</div>
+    <div class="g3">
+      <div class="tc" onclick="window.open('https://suno.ai','_blank')"><div class="tc-icon">🎵</div><div class="tc-name">Suno AI</div><div class="tc-desc">50 chansons originales/jour. Toutes ambiances.</div><span class="badge badge-grn">50/JOUR GRATUIT</span></div>
+      <div class="tc" onclick="window.open('https://udio.com','_blank')"><div class="tc-icon">🎹</div><div class="tc-name">Udio</div><div class="tc-desc">Musique IA haute qualité, toute durée.</div><span class="badge badge-grn">PLAN GRATUIT</span></div>
+      <div class="tc" onclick="window.open('https://elevenlabs.io','_blank')"><div class="tc-icon">🎙️</div><div class="tc-name">ElevenLabs</div><div class="tc-desc">Voix off ultra-réaliste. 10 000 car./mois gratuit.</div><span class="badge badge-grn">10K/MOIS GRATUIT</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-hd">✂️ MONTAGE VIDÉO — 100% GRATUIT</div>
+    <div class="g3">
+      <div class="tc" onclick="window.open('https://www.blackmagicdesign.com/fr/products/davinciresolve','_blank')"><div class="tc-icon">🎞️</div><div class="tc-name">DaVinci Resolve</div><div class="tc-desc">Montage professionnel Hollywood. 100% gratuit.</div><span class="badge badge-grn">100% GRATUIT</span></div>
+      <div class="tc" onclick="window.open('https://kdenlive.org/fr/','_blank')"><div class="tc-icon">✂️</div><div class="tc-name">Kdenlive</div><div class="tc-desc">Open source professionnel. Linux/Mac/Windows.</div><span class="badge badge-grn">OPEN SOURCE</span></div>
+      <div class="tc" onclick="window.open('https://www.openshot.org/fr/','_blank')"><div class="tc-icon">🎬</div><div class="tc-name">OpenShot</div><div class="tc-desc">Interface simple. Idéal pour débuter.</div><span class="badge badge-grn">GRATUIT</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-hd">✍️ SCÉNARIO & ÉCRITURE</div>
+    <div class="g3">
+      <div class="tc" onclick="window.open('https://trelby.org','_blank')"><div class="tc-icon">📝</div><div class="tc-name">Trelby</div><div class="tc-desc">Logiciel scénario professionnel gratuit.</div><span class="badge badge-grn">GRATUIT</span></div>
+      <div class="tc" onclick="window.open('https://www.celtx.com','_blank')"><div class="tc-icon">📄</div><div class="tc-name">Celtx</div><div class="tc-desc">Formatage professionnel Hollywood en ligne.</div><span class="badge badge-grn">GRATUIT DE BASE</span></div>
+      <div class="tc" onclick="window.open('https://fountain.io','_blank')"><div class="tc-icon">⛲</div><div class="tc-name">Fountain</div><div class="tc-desc">Format texte simple pour scénarios.</div><span class="badge badge-grn">OPEN SOURCE</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════ CONFIG ══════════════════════ -->
+<div id="tab-cfg" class="tab">
+  <div class="card">
+    <div class="card-hd">INFORMATIONS DU STUDIO</div>
+    <div style="font-size:.82rem;line-height:2">
+      <div>🎬 <strong style="color:var(--gold)">BENY-JOE CINIE IA v4 Ultimate</strong> — Studio de Production Cinématographique</div>
+      <div>✦ <strong>Fondé par</strong> KHEDIM BENYAKHLEF dit BENY-JOE</div>
+      <div>🤖 Propulsé par <strong style="color:var(--grn)">Google Groq Llama 3.3 70B</strong> — Le modèle IA le plus récent</div>
+      <div>🔒 Clé API stockée <strong>uniquement côté serveur</strong> — jamais exposée au navigateur</div>
+      <div>💾 Exports sauvegardés dans <strong>_data/exports/</strong> sur le serveur</div>
+      <div style="margin-top:.5rem" id="key-status">⏳ Vérification de la clé API...</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">🔑 CLÉ API GOOGLE GROQ AI</div>
+    <div style="font-size:.78rem;color:var(--mu);margin-bottom:.9rem">
+      Obtenez votre clé <strong style="color:var(--gold)">GRATUITE</strong> sur :
+      <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--gold)">aistudio.google.com/app/apikey</a><br>
+      Plan gratuit : <strong>1500 requêtes/jour</strong> avec Groq Llama 3.3 70B — aucune carte bancaire requise.<br>
+      La clé commence par <code style="color:var(--gold)">AIza...</code> et est stockée uniquement côté serveur.
+    </div>
+    <div style="display:flex;gap:.42rem;align-items:flex-end">
+      <div style="flex:1"><label>ENTREZ VOTRE CLÉ GEMINI API</label><input type="password" id="key-in" placeholder="AIza..."></div>
+      <button class="btn btn-gold" onclick="saveKey()">🔒 Sauvegarder</button>
+    </div>
+    <div style="margin-top:.65rem;display:grid;grid-template-columns:1fr 1fr;gap:.5rem;font-size:.72rem">
+      <div style="padding:.55rem;background:rgba(61,184,128,.07);border:1px solid rgba(61,184,128,.2);border-radius:7px;color:var(--grn)">✅ 1500 requêtes / jour</div>
+      <div style="padding:.55rem;background:rgba(61,184,128,.07);border:1px solid rgba(61,184,128,.2);border-radius:7px;color:var(--grn)">✅ Groq Llama 3.3 70B</div>
+      <div style="padding:.55rem;background:rgba(61,184,128,.07);border:1px solid rgba(61,184,128,.2);border-radius:7px;color:var(--grn)">✅ 8192 tokens / réponse</div>
+      <div style="padding:.55rem;background:rgba(61,184,128,.07);border:1px solid rgba(61,184,128,.2);border-radius:7px;color:var(--grn)">✅ Aucun paiement requis</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">PRÉFÉRENCES</div>
+    <div class="srow"><div class="slabel">Notifications IA<div class="sdesc">Afficher les alertes à chaque génération</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+    <div class="srow"><div class="slabel">Sauvegarde auto<div class="sdesc">Sauvegarder le script toutes les 10 min</div></div><div class="toggle" onclick="this.classList.toggle('on')"></div></div>
+    <div class="srow" style="border:none"><div class="slabel">Mode haute qualité<div class="sdesc">Utiliser 8192 tokens (réponses plus longues)</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-hd">DANGER</div>
+    <p style="font-size:.78rem;color:var(--mu);margin-bottom:.75rem">Supprimer toutes les données du projet (scènes, historique, exports locaux). Cette action est irréversible.</p>
+    <button class="btn btn-red" onclick="resetProjet()">⚠️ Réinitialiser le projet</button>
+  </div>
+</div>
+
+</div><!-- /main -->
+
+<footer>🎬 <strong>BENY-JOE CINIE IA v4 Ultimate</strong> &nbsp;·&nbsp; Fondé par <span style="color:var(--gold)">KHEDIM BENYAKHLEF dit BENY-JOE</span> &nbsp;·&nbsp; Propulsé par <span style="color:var(--grn)">Google Groq Llama 3.3 70B</span></footer>
+<div id="notif"></div>
+
+<!-- ══════════════════════ MODAL VISIONNEUSE ══════════════════════ -->
+<div class="modal-bg" id="modal-bg" onclick="fermerModal(event)">
+  <div class="modal" id="modal">
+    <div class="modal-hd">
+      <span id="modal-title">Aperçu</span>
+      <button class="modal-close" onclick="fermerModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div style="display:flex;gap:.42rem;margin-top:1rem;flex-wrap:wrap">
+      <button class="btn btn-gold" onclick="telechargerModal()">💾 Télécharger</button>
+      <button class="btn btn-out" onclick="copierModal()">📋 Copier</button>
+      <button class="btn btn-out" onclick="fermerModal()">Fermer</button>
+    </div>
+  </div>
+</div>
 
 <script>
-// ─── ÉTAT ────────────────────────────────────────────────────────────────────
-let scenes=[], chatHistory=[], prodType='court', currentUser=null;
+/* ══════════════════ ÉTAT GLOBAL ══════════════════ */
+var scenes    = [];
+var chatHist  = [];
+var prodType  = 'court';
+var produits  = [];   // produits sauvegardés localement (session)
+var clipCount = 0;
 
-// ─── AUTH ─────────────────────────────────────────────────────────────────────
-function switchTab(panel, btn){
-  document.querySelectorAll('.auth-tab').forEach(t=>t.classList.remove('active'));
-  btn.classList.add('active');
-  document.querySelectorAll('.auth-panel').forEach(p=>p.style.display='none');
-  document.getElementById('panel-'+panel).style.display='flex';
+/* ══════════════════ NAVIGATION ══════════════════ */
+function nbAt(i){ return document.querySelectorAll('#nav .nb')[i]; }
+
+function show(name, btn){
+  document.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('on'); });
+  var el = document.getElementById('tab-'+name);
+  if(el) el.classList.add('on');
+  document.querySelectorAll('#nav .nb').forEach(function(b){ b.classList.remove('on'); });
+  if(btn) btn.classList.add('on');
+  if(name === 'export') chargerExports();
+  if(name === 'home') updateHomeStats();
 }
 
-async function doLogin(){
-  const u=document.getElementById('login-user').value.trim();
-  const p=document.getElementById('login-pass').value.trim();
-  const err=document.getElementById('login-err');
-  err.style.display='none';
-  if(!u||!p){err.textContent='Remplissez tous les champs';err.style.display='block';return;}
-  const btn=document.getElementById('login-btn');
-  btn.disabled=true;btn.innerHTML='<span class="loader"></span> Connexion...';
-  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
-  const d=await r.json();
-  btn.disabled=false;btn.innerHTML='▶ ENTRER DANS LE STUDIO';
-  if(d.error){err.textContent='❌ '+d.error;err.style.display='block';}
-  else{localStorage.setItem('bjci_token',d.token);currentUser=d;showApp(d);}
+/* ══════════════════ NOTIFS ══════════════════ */
+function notif(msg, type){
+  var el = document.getElementById('notif');
+  el.textContent = msg;
+  el.className = 'show ' + (type === 'err' ? 'err' : 'ok');
+  clearTimeout(el._t);
+  el._t = setTimeout(function(){ el.classList.remove('show'); }, 3600);
 }
 
-async function doRegister(){
-  const u=document.getElementById('reg-user').value.trim();
-  const name=document.getElementById('reg-name').value.trim();
-  const p=document.getElementById('reg-pass').value.trim();
-  const p2=document.getElementById('reg-pass2').value.trim();
-  const err=document.getElementById('reg-err');
-  err.style.display='none';
-  if(!u||!name||!p||!p2){err.textContent='Remplissez tous les champs';err.style.display='block';return;}
-  if(p.length<6){err.textContent='Mot de passe trop court (min 6 car.)';err.style.display='block';return;}
-  if(p!==p2){err.textContent='❌ Mots de passe différents';err.style.display='block';return;}
-  const btn=document.getElementById('reg-btn');
-  btn.disabled=true;btn.innerHTML='<span class="loader"></span> Inscription...';
-  const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,name})});
-  const d=await r.json();
-  btn.disabled=false;btn.innerHTML='✨ CRÉER MON COMPTE';
-  if(d.error){err.textContent='❌ '+d.error;err.style.display='block';}
-  else{localStorage.setItem('bjci_token',d.token);currentUser=d;showApp(d);}
-}
-
-async function doLogout(){
-  const t=localStorage.getItem('bjci_token');
-  if(t) await fetch('/api/logout',{method:'POST',headers:{Authorization:'Bearer '+t}});
-  localStorage.removeItem('bjci_token');
-  location.reload();
-}
-
-function showApp(user){
-  document.getElementById('auth-screen').style.display='none';
-  document.getElementById('app').classList.add('visible');
-  document.getElementById('user-display').textContent=user.name||user.username;
-  if(user.role==='admin') document.getElementById('admin-section').style.display='block';
-  checkKeyStatus();
-  notif('🎬 Bienvenue '+( user.name||user.username)+' !','success');
-}
-
-async function checkKeyStatus(){
-  try{
-    const t=localStorage.getItem('bjci_token');
-    const r=await fetch('/api/key-status',{headers:{Authorization:'Bearer '+t}});
-    const d=await r.json();
-    const el=document.getElementById('key-status-info');
-    el.textContent=d.configured?'✅ Clé API configurée — IA opérationnelle':'⚠️ Aucune clé API — Fonctions IA désactivées';
-    el.style.color=d.configured?'var(--green)':'var(--red)';
-  }catch(e){}
-}
-
-async function sauvegarderCle(){
-  const key=document.getElementById('key-admin').value.trim();
-  if(!key) return;
-  const t=localStorage.getItem('bjci_token');
-  const r=await fetch('/api/set-key',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+t},body:JSON.stringify({key})});
-  const d=await r.json();
-  if(d.error){notif('Erreur: '+d.error,'error');}
-  else{notif('✅ Clé sécurisée sur le serveur !','success');document.getElementById('key-admin').value='';checkKeyStatus();}
-}
-
-// ─── INIT ──────────────────────────────────────────────────────────────────────
-window.addEventListener('load',async()=>{
-  setupPills();
-  const t=localStorage.getItem('bjci_token');
-  if(t){
-    try{
-      const r=await fetch('/api/me',{headers:{Authorization:'Bearer '+t}});
-      if(r.ok){const d=await r.json();currentUser=d;showApp(d);return;}
-    }catch(e){}
-    localStorage.removeItem('bjci_token');
-  }
-  document.getElementById('auth-screen').style.display='flex';
-});
-
-document.getElementById('login-pass').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
-document.getElementById('reg-pass2').addEventListener('keydown',e=>{if(e.key==='Enter')doRegister();});
-
-// ─── NAV ───────────────────────────────────────────────────────────────────────
-function goTab(id,btn){
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
-  if(btn) btn.classList.add('active');
-}
-
-function notif(msg,type='success'){
-  const el=document.getElementById('notif');
-  el.textContent=msg;el.className='notif '+type+' show';
-  setTimeout(()=>el.classList.remove('show'),3500);
-}
-
-function setupPills(){
-  document.querySelectorAll('.type-pills').forEach(c=>{
-    c.querySelectorAll('.pill').forEach(p=>{
-      p.addEventListener('click',()=>{c.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));p.classList.add('active');});
+/* ══════════════════ PILLS ══════════════════ */
+function initPills(){
+  document.querySelectorAll('.pills').forEach(function(c){
+    c.querySelectorAll('.pill').forEach(function(p){
+      p.addEventListener('click', function(){
+        c.querySelectorAll('.pill').forEach(function(x){ x.classList.remove('on'); });
+        p.classList.add('on');
+      });
     });
   });
 }
 
-// ─── API CLAUDE (via backend sécurisé) ───────────────────────────────────────
-async function callClaude(prompt,sys){
-  const t=localStorage.getItem('bjci_token');
-  try{
-    const r=await fetch('/api/claude',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+t},body:JSON.stringify({messages:[{role:'user',content:prompt}],system:sys||'Tu es un scénariste et réalisateur professionnel. Réponds en français avec style professionnel.',max_tokens:4000})});
-    const d=await r.json();
-    if(d.error){notif('Erreur IA: '+d.error,'error');return null;}
-    return d.text;
-  }catch(e){notif('Erreur réseau','error');return null;}
+/* ══════════════════ STATS ACCUEIL ══════════════════ */
+function updateHomeStats(){
+  var t = document.getElementById('titre');
+  if(t && t.value){
+    document.getElementById('home-titre').textContent = t.value;
+    var tp = document.querySelector('#type-pills .pill.on');
+    document.getElementById('home-type').textContent = tp ? tp.textContent : '—';
+  }
+  document.getElementById('stat-scenes').textContent = scenes.length;
+  document.getElementById('stat-exports').textContent = produits.length;
+  document.getElementById('stat-clips').textContent = clipCount;
+  document.getElementById('stat-msgs').textContent = chatHist.length;
 }
 
-// ─── SCÉNARIO ─────────────────────────────────────────────────────────────────
-function selectProd(type){
-  prodType=type;
-  document.querySelectorAll('.prod-type-card').forEach(el=>{el.style.borderColor='';el.style.background='';});
-  const map={court:'prod-cm',long:'prod-lm',clip:'prod-clip',doc:'prod-doc',anim:'prod-anim',serie:'prod-serie'};
-  const el=document.getElementById(map[type]);
-  if(el){el.style.borderColor='var(--gold)';el.style.background='rgba(201,168,76,.08)';}
+/* ══════════════════ CLÉ API ══════════════════ */
+function checkKey(){
+  fetch('/api/key-status')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var el    = document.getElementById('key-status');
+      var badge = document.getElementById('ai-status-badge');
+      var alert = document.getElementById('home-key-alert');
+      if(d.configured){
+        if(el){ el.innerHTML = '✅ Clé Groq Llama 3.3 configurée — <strong>IA opérationnelle</strong>'; el.style.color = 'var(--grn)'; }
+        if(badge){ badge.textContent = '⚡ GROQ AI ✓'; badge.className = 'ok'; }
+        if(alert) alert.style.display = 'none';
+      } else {
+        if(el){ el.innerHTML = '⚠️ Aucune clé API — <a href="#" onclick="show(\'cfg\',nbAt(9))" style="color:var(--gold)">Configurer maintenant</a>'; el.style.color = 'var(--red)'; }
+        if(badge){ badge.textContent = 'IA INACTIF'; badge.className = ''; }
+        if(alert) alert.style.display = '';
+      }
+    }).catch(function(){});
 }
 
-function ajouterPerso(){
-  const v=document.getElementById('new-perso').value.trim();if(!v)return;
-  const d=document.createElement('div');
-  d.style.cssText='display:flex;align-items:center;gap:.4rem;padding:.35rem .65rem;background:#07111e;border-radius:8px;border:1px solid var(--dim);font-size:.8rem;';
-  d.innerHTML='<span style="color:var(--gold)">👤</span><span style="flex:1">'+v+'</span><button onclick="this.parentNode.remove()" style="background:none;border:none;color:var(--muted);cursor:pointer;">✕</button>';
+function saveKey(){
+  var k = document.getElementById('key-in').value.trim();
+  if(!k){ notif('Entrez une clé Groq API (AIza...)', 'err'); return; }
+  if(k.length < 20){ notif('Clé invalide — vérifiez qu\'elle commence par AIza...', 'err'); return; }
+  fetch('/api/set-key', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({key:k})
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if(d.error){ notif('Erreur : '+d.error, 'err'); }
+    else { notif('✅ Clé Groq Llama 3.3 sécurisée sur le serveur !'); document.getElementById('key-in').value=''; checkKey(); }
+  })
+  .catch(function(){ notif('Erreur réseau', 'err'); });
+}
+
+/* ══════════════════ APPEL GROQ AI ══════════════════ */
+function groq(prompt, sys, cb){
+  var btn = event && event.target;
+  if(btn && btn.classList) btn.disabled = true;
+  fetch('/api/groq', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      messages: [{role:'user', content: prompt}],
+      system: sys || 'Tu es un scénariste et réalisateur professionnel de cinéma. Réponds en français avec précision, créativité et style cinématographique professionnel.'
+    })
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    if(btn && btn.classList) btn.disabled = false;
+    if(d.error){ notif('Erreur IA : '+d.error, 'err'); cb(null); }
+    else cb(d.text);
+  })
+  .catch(function(e){ if(btn && btn.classList) btn.disabled = false; notif('Erreur réseau : '+e.message, 'err'); cb(null); });
+}
+
+/* ══════════════════ SCÉNARIO ══════════════════ */
+function addPerso(){
+  var v = document.getElementById('new-perso').value.trim();
+  if(!v){ notif('Entrez un personnage', 'err'); return; }
+  var d = document.createElement('div');
+  d.style.cssText = 'display:flex;align-items:center;gap:.42rem;padding:.35rem .65rem;background:#07111e;border-radius:7px;border:1px solid var(--dim);font-size:.78rem';
+  d.innerHTML = '<span style="color:var(--gold)">👤</span><span style="flex:1">'+esc(v)+'</span><button onclick="this.parentNode.remove()" style="background:none;border:none;color:var(--mu);cursor:pointer;font-size:.9rem;padding:0">✕</button>';
   document.getElementById('perso-list').appendChild(d);
-  document.getElementById('new-perso').value='';
+  document.getElementById('new-perso').value = '';
 }
 
-function ajouterScene(titre,type,desc){
-  const sc={id:Date.now(),num:scenes.length+1,titre:titre||'',type:type||'INT.',desc:desc||''};
-  scenes.push(sc);renderScenes();
-  document.getElementById('empty-scenes').style.display='none';
+function getPersonnages(){
+  return Array.from(document.querySelectorAll('#perso-list span[style*="flex:1"]')).map(function(s){ return s.textContent; });
+}
+
+function addScene(titre, type, desc){
+  var sc = {id:Date.now(), num:scenes.length+1, titre:titre||'', type:type||'INT.', desc:desc||''};
+  scenes.push(sc);
+  renderScenes();
+  document.getElementById('scene-empty').style.display = 'none';
+  updateHomeStats();
 }
 
 function renderScenes(){
-  const c=document.getElementById('scenes-container');c.innerHTML='';
-  document.getElementById('scenes-count').textContent=scenes.length+' scène(s)';
-  scenes.forEach((sc,i)=>{
-    const d=document.createElement('div');d.className='scene-item';
-    d.innerHTML='<div class="scene-num">'+sc.num+'</div><div style="flex:1"><div style="display:flex;gap:.4rem;margin-bottom:.3rem;"><input value="'+sc.titre.replace(/"/g,'&quot;')+'" placeholder="Titre..." style="flex:1;font-size:.8rem;font-weight:700;" oninput="scenes['+i+'].titre=this.value"><select style="width:110px;font-size:.7rem;" onchange="scenes['+i+'].type=this.value"><option '+(sc.type==='INT.'?'selected':'')+'>INT.</option><option '+(sc.type==='EXT.'?'selected':'')+'>EXT.</option><option '+(sc.type==='INT./EXT.'?'selected':'')+'>INT./EXT.</option></select></div><textarea placeholder="Description..." style="min-height:65px;font-size:.78rem;" oninput="scenes['+i+'].desc=this.value">'+sc.desc+'</textarea></div><div style="display:flex;flex-direction:column;gap:.3rem;"><button class="btn btn-outline" style="font-size:.68rem;padding:.25rem .5rem;" onclick="genererSceneIA('+i+')">🤖</button><button class="btn btn-red" style="font-size:.68rem;padding:.25rem .5rem;" onclick="supprimerScene('+i+')">✕</button></div>';
+  var c = document.getElementById('scene-list'); c.innerHTML = '';
+  document.getElementById('scene-count').textContent = scenes.length + ' scène(s)';
+  scenes.forEach(function(sc, i){
+    var d = document.createElement('div');
+    d.className = 'scene-item';
+    d.innerHTML =
+      '<div class="scene-num">'+sc.num+'</div>'+
+      '<div class="scene-body">'+
+        '<div class="scene-row">'+
+          '<input data-i="'+i+'" data-f="titre" value="'+escA(sc.titre)+'" placeholder="Titre de la scène..." style="flex:1;font-size:.79rem;font-weight:700">'+
+          '<select data-i="'+i+'" data-f="type" style="width:100px;font-size:.75rem">'+
+            ['INT.','EXT.','INT./EXT.','EXT./INT.'].map(function(t){ return '<option'+(sc.type===t?' selected':'')+'>'+t+'</option>'; }).join('')+
+          '</select>'+
+          '<button class="btn btn-out btn-sm" onclick="genSceneIA('+i+')">🤖 IA</button>'+
+          '<button class="btn btn-red btn-sm" onclick="supprimerScene('+i+')">✕</button>'+
+        '</div>'+
+        '<textarea data-i="'+i+'" data-f="desc" placeholder="Description, décor, action, dialogues..." style="min-height:75px;font-size:.77rem">'+escA(sc.desc)+'</textarea>'+
+      '</div>';
+    d.querySelectorAll('input,select,textarea').forEach(function(el){
+      el.addEventListener('input', function(){
+        var idx = +this.getAttribute('data-i');
+        var field = this.getAttribute('data-f');
+        if(scenes[idx]) scenes[idx][field] = this.value;
+      });
+    });
     c.appendChild(d);
   });
+  updateHomeStats();
 }
 
-function supprimerScene(i){scenes.splice(i,1);scenes.forEach((s,j)=>s.num=j+1);renderScenes();}
+function supprimerScene(i){
+  scenes.splice(i,1);
+  scenes.forEach(function(s,idx){ s.num=idx+1; });
+  renderScenes();
+  if(scenes.length===0) document.getElementById('scene-empty').style.display='';
+}
 
-async function genererScenario(){
-  const synopsis=document.getElementById('synopsis').value.trim();
-  if(!synopsis){notif('Écrivez votre synopsis','error');return;}
-  notif('🤖 Génération en cours...');
-  const titre=document.getElementById('proj-titre').value||'Sans titre';
-  const genre=document.getElementById('proj-genre').value;
-  const duree=document.getElementById('proj-duree').value;
-  const langue=document.getElementById('proj-langue').value;
-  const result=await callClaude('Écris un scénario professionnel pour "'+titre+'" — Genre: '+genre+' — Durée: '+duree+' — Langue: '+langue+'\n\nSYNOPSIS: '+synopsis+'\n\nFormat: SCÈNE N — INT./EXT. LIEU — MOMENT\n[Description + Dialogues]\n\nGénère 8 à 15 scènes.');
-  if(!result)return;
-  scenes=[];
-  const lignes=result.split('\n');let cur=null,num=0;
-  lignes.forEach(l=>{
-    const m=l.match(/SC[EÈ]NE?\s*(\d+)\s*[—–-]\s*(.+)/i);
-    if(m){if(cur)scenes.push(cur);num++;cur={id:Date.now()+num,num,titre:m[2].trim(),type:'INT.',desc:''};}
-    else if(cur&&l.trim())cur.desc+=(cur.desc?'\n':'')+l;
+function genScenario(){
+  var titre  = document.getElementById('titre').value || 'Sans titre';
+  var genre  = document.getElementById('genre').value;
+  var duree  = document.getElementById('duree').value;
+  var langue = document.getElementById('langue').value;
+  var type   = (document.querySelector('#type-pills .pill.on')||{}).textContent || 'Court Métrage';
+  var syn    = document.getElementById('synopsis').value;
+  if(!syn){ notif('Écrivez votre synopsis d\'abord', 'err'); return; }
+  notif('🤖 Génération du scénario complet par Groq Llama 3.3...');
+  var p = 'Génère un SCÉNARIO DE FILM PROFESSIONNEL complet au format scène par scène.\n\nTITRE: '+titre+'\nTYPE: '+type+'\nGENRE: '+genre+'\nDURÉE: '+duree+'\nLANGUE DIALOGUES: '+langue+'\nSYNOPSIS: '+syn+'\n\nFormat pour chaque scène:\nSCÈNE N — TITRE\n[INT./EXT.] LIEU — MOMENT\nDescription action...\nDIALOGUES:\nPERSONNAGE: texte\n---\n\nCrée au minimum 5 scènes avec dialogues, descriptions atmosphériques détaillées.';
+  groq(p, 'Tu es un scénariste professionnel primé. Génère des scénarios de qualité festival.', function(r){
+    if(!r) return;
+    scenes = [];
+    var blocs = r.split(/SCÈNE\s+\d+\s*[—-]/i).filter(function(b){ return b.trim(); });
+    if(blocs.length < 2) blocs = r.split(/---+/).filter(function(b){ return b.trim(); });
+    blocs.forEach(function(b, idx){
+      var lines = b.trim().split('\n');
+      var titre = lines[0] ? lines[0].replace(/^\s*[\[\(].*?[\]\)]/, '').trim() : 'Scène '+(idx+1);
+      var rest  = lines.slice(1).join('\n').trim();
+      var type  = 'INT.';
+      var match = rest.match(/\b(INT\.|EXT\.|INT\.\/EXT\.|EXT\.\/INT\.)\b/);
+      if(match){ type = match[1]; rest = rest.replace(match[0], '').trim(); }
+      scenes.push({id:Date.now()+idx, num:idx+1, titre:titre.substring(0,80), type:type, desc:rest.substring(0,1000)});
+    });
+    if(scenes.length===0){ addScene('Scénario complet','INT.',r.substring(0,800)); }
+    else renderScenes();
+    document.getElementById('scene-empty').style.display = 'none';
+    notif('✅ '+scenes.length+' scènes générées avec Groq Llama 3.3 !');
   });
-  if(cur)scenes.push(cur);
-  if(scenes.length===0)ajouterScene('Scénario complet','INT.',result.substring(0,800));
-  else renderScenes();
-  document.getElementById('empty-scenes').style.display='none';
-  notif('✅ '+scenes.length+' scènes générées !','success');
 }
 
-async function ameliorerSynopsis(){
-  const s=document.getElementById('synopsis').value.trim();
-  if(!s){notif('Écrivez votre synopsis','error');return;}
-  notif('🤖 Amélioration...');
-  const r=await callClaude('Améliore ce synopsis de film pour le rendre plus accrocheur et cinématographique:\n\n'+s);
-  if(r){document.getElementById('synopsis').value=r;notif('✅ Amélioré !','success');}
-}
-
-async function genererPersonnages(){
-  const s=document.getElementById('synopsis').value.trim();
-  if(!s){notif('Écrivez votre synopsis','error');return;}
-  notif('🤖 Génération personnages...');
-  const r=await callClaude('Crée 4-6 personnages depuis ce synopsis. Format: Nom | Âge | Rôle | Trait | Arc narratif\n\nSYNOPSIS: '+s);
-  if(!r)return;
-  const c=document.getElementById('perso-list');c.innerHTML='';
-  r.split('\n').filter(l=>l.includes('|')).forEach(l=>{
-    const d=document.createElement('div');
-    d.style.cssText='display:flex;align-items:center;gap:.4rem;padding:.35rem .65rem;background:#07111e;border-radius:8px;border:1px solid var(--dim);font-size:.76rem;';
-    d.innerHTML='<span style="color:var(--gold)">👤</span><span style="flex:1">'+l.trim()+'</span><button onclick="this.parentNode.remove()" style="background:none;border:none;color:var(--muted);cursor:pointer;">✕</button>';
-    c.appendChild(d);
+function ameliorerSynopsis(){
+  var s = document.getElementById('synopsis').value.trim();
+  if(!s){ notif('Écrivez votre synopsis','err'); return; }
+  notif('🤖 Amélioration en cours...');
+  groq('Améliore ce synopsis de film pour le rendre plus accrocheur, cinématographique et percutant. Conserve l\'essence mais rend-le plus dramatique et visuel:\n\n'+s, null, function(r){
+    if(r){ document.getElementById('synopsis').value=r; notif('✅ Synopsis amélioré !'); }
   });
-  notif('✅ Personnages générés !','success');
 }
 
-async function genererSceneIA(i){
-  const sc=scenes[i];notif('🤖 Génération scène...');
-  const r=await callClaude('Écris cette scène de façon professionnelle:\n\nSCÈNE: '+sc.titre+'\nCONTEXTE: '+(sc.desc||'vide')+'\n\nAvec: description, atmosphère, dialogues.');
-  if(r){scenes[i].desc=r;renderScenes();notif('✅ Scène générée !','success');}
-}
-
-async function restructurerScenes(){
-  if(scenes.length<2){notif('Min 2 scènes requises','error');return;}
-  notif('🔄 Restructuration...');
-  const txt=scenes.map(s=>s.num+'. '+s.titre+': '+(s.desc||'').substring(0,100)).join('\n');
-  const r=await callClaude('Analyse ces scènes et propose un réordonnancement optimal pour un impact dramatique maximal:\n'+txt);
-  if(r){document.getElementById('prod-output-card').style.display='block';document.getElementById('prod-output').textContent=r;goTab('tab-production',document.querySelectorAll('.nav-btn')[3]);notif('✅ Suggestions prêtes','success');}
-}
-
-// ─── PRODUCTION ───────────────────────────────────────────────────────────────
-async function lancerProduction(){
-  const style=document.getElementById('style-visuel').value;
-  const ratio=document.getElementById('ratio').value;
-  const palette=document.getElementById('palette').value;
-  const langue=document.getElementById('langue-prod').value;
-  const criteres=document.getElementById('prod-criteres').value;
-  const synopsis=document.getElementById('synopsis')?.value||'';
-  document.getElementById('prod-output-card').style.display='block';
-  const prog=document.getElementById('prod-progress');
-  const out=document.getElementById('prod-output');
-  out.textContent='⏳ Génération...';prog.style.width='25%';
-  const r=await callClaude('Crée un PLAN DE PRODUCTION CINÉMATOGRAPHIQUE PROFESSIONNEL:\n\nTYPE: '+prodType.toUpperCase()+'\nSTYLE: '+style+'\nRATIO: '+ratio+'\nPALETTE: '+palette+'\nLANGUE: '+langue+'\nSYNOPSIS: '+synopsis.substring(0,300)+'\nCRITÈRES: '+(criteres||'Standard')+'\n\nInclure: Pré-production, Tournage, Post-production, Outils IA gratuits, Planning 4 semaines.');
-  prog.style.width='100%';
-  if(r){out.textContent=r;notif('✅ Plan généré !','success');}
-}
-
-async function genererPrompts(){
-  if(scenes.length===0){notif('Ajoutez des scènes','error');return;}
-  notif('🤖 Génération prompts...');
-  const txt=scenes.slice(0,8).map(s=>s.num+'. '+s.titre+': '+(s.desc||'').substring(0,150)).join('\n');
-  const style=document.getElementById('style-visuel')?.value||'Réaliste';
-  const r=await callClaude('Génère des prompts Stable Diffusion pour chaque scène:\n'+txt+'\n\nStyle: '+style+'\nFormat: SCÈNE N: [prompt anglais ultra-détaillé, éclairage, caméra, qualité cinéma]');
-  if(r){document.getElementById('prod-output-card').style.display='block';document.getElementById('prod-output').textContent=r;notif('✅ Prompts générés !','success');}
-}
-
-async function genererVoixOff(){
-  const synopsis=document.getElementById('synopsis')?.value||'';
-  if(!synopsis){notif('Écrivez votre synopsis','error');return;}
-  notif('🤖 Génération narration...');
-  const r=await callClaude('Écris une narration voix off professionnelle pour ce film. Ton cinématographique, évocateur:\n\nSYNOPSIS: '+synopsis+'\nTYPE: '+prodType);
-  if(r){document.getElementById('prod-output-card').style.display='block';document.getElementById('prod-output').textContent=r;notif('✅ Narration générée !','success');}
-}
-
-// ─── VISUELS ──────────────────────────────────────────────────────────────────
-async function genererPromptVisuel(){
-  const desc=document.getElementById('vis-desc').value.trim();
-  const style=document.getElementById('vis-style').value;
-  if(!desc){notif('Décrivez votre scène','error');return;}
-  notif('🤖 Génération...');
-  const r=await callClaude('Génère un prompt image ultra-optimisé pour Stable Diffusion XL en anglais pour:\n\nDESCRIPTION: '+desc+'\nSTYLE: '+style+'\n\nTrès détaillé: composition, éclairage, caméra, qualité, style artistique. Inclus aussi les negative prompts.');
-  if(r){document.getElementById('vis-prompt').textContent=r;notif('✅ Prompt généré !','success');}
-}
-
-async function genererStoryboard(){
-  if(scenes.length===0){notif('Ajoutez des scènes','error');return;}
-  const c=document.getElementById('storyboard-grid');c.innerHTML='';
-  notif('🤖 Storyboard...');
-  const txt=scenes.map(s=>s.num+'. '+s.titre+': '+(s.desc||'').substring(0,120)).join('\n');
-  const style=document.getElementById('style-visuel')?.value||'Cinéma';
-  const r=await callClaude('Pour chaque scène génère un prompt Stable Diffusion. Format: SCÈNE N|prompt_anglais\n\n'+txt+'\nStyle: '+style);
-  if(!r)return;
-  r.split('\n').filter(l=>l.includes('|')).forEach((line,i)=>{
-    const [label,prompt]=line.split('|');
-    const d=document.createElement('div');
-    d.style.cssText='background:#07111e;border:1px solid var(--dim);border-radius:10px;padding:.9rem;';
-    d.innerHTML='<div style="font-size:.7rem;color:var(--gold);font-weight:700;margin-bottom:.35rem;">'+(label?.trim()||'SCÈNE '+(i+1))+'</div><div style="font-size:.7rem;color:var(--muted);line-height:1.4;margin-bottom:.5rem;">'+(prompt?.trim()||'')+'</div><button class="btn btn-outline" style="font-size:.66rem;padding:.2rem .5rem;width:100%;" onclick="navigator.clipboard.writeText(\''+((prompt||'').replace(/'/g,"\\'"))+'\');notif(\'Copié !\',\'success\')">📋 Copier</button>';
-    c.appendChild(d);
+function genPersonnages(){
+  var s = document.getElementById('synopsis').value.trim();
+  if(!s){ notif('Écrivez votre synopsis','err'); return; }
+  notif('🤖 Génération des personnages...');
+  groq('Depuis ce synopsis, crée 4-6 personnages cinématographiques.\nFormat STRICT: Nom | Âge | Rôle | Trait dominant | Arc narratif\n\nSYNOPSIS: '+s, null, function(r){
+    if(!r) return;
+    var c = document.getElementById('perso-list'); c.innerHTML='';
+    r.split('\n').filter(function(l){ return l.includes('|'); }).forEach(function(l){
+      var d = document.createElement('div');
+      d.style.cssText='display:flex;align-items:center;gap:.42rem;padding:.35rem .65rem;background:#07111e;border-radius:7px;border:1px solid var(--dim);font-size:.75rem';
+      d.innerHTML='<span style="color:var(--gold)">👤</span><span style="flex:1">'+esc(l.trim())+'</span><button onclick="this.parentNode.remove()" style="background:none;border:none;color:var(--mu);cursor:pointer">✕</button>';
+      c.appendChild(d);
+    });
+    notif('✅ Personnages générés !');
   });
-  notif('✅ Storyboard généré !','success');
 }
 
-// ─── IMPORT ───────────────────────────────────────────────────────────────────
-function chargerFichier(input){
-  const file=input.files[0];if(!file)return;
-  const reader=new FileReader();
-  reader.onload=e=>{document.getElementById('import-text').value=e.target.result.substring(0,10000);notif('📂 Fichier chargé !','success');};
+function genSceneIA(i){
+  notif('🤖 Génération de la scène '+scenes[i].num+'...');
+  var persos = getPersonnages().join(', ') || 'non définis';
+  groq('Écris cette scène de film de façon professionnelle avec dialogues et mise en scène:\nSCÈNE: '+scenes[i].titre+'\nTYPE: '+scenes[i].type+'\nCONTEXTE: '+(scenes[i].desc||'vide')+'\nPERSONNAGES DU FILM: '+persos+'\n\nInclure: description atmosphérique, action détaillée, dialogues réalistes.', null, function(r){
+    if(r){ scenes[i].desc=r; renderScenes(); notif('✅ Scène '+scenes[i].num+' rédigée !'); }
+  });
+}
+
+function genDialogues(){
+  if(scenes.length===0){ notif('Ajoutez des scènes d\'abord','err'); return; }
+  notif('🤖 Génération des dialogues...');
+  var synopsis = document.getElementById('synopsis').value||'';
+  var txt = scenes.map(function(s){ return 'Scène '+s.num+': '+s.titre+' — '+(s.desc||'').substring(0,100); }).join('\n');
+  groq('Génère des dialogues cinématographiques professionnels pour ces scènes:\n\nSYNOPSIS: '+synopsis.substring(0,300)+'\n\nSCÈNES:\n'+txt+'\n\nFormat: SCÈNE N\nPERSONNAGE A:\n(texte)\nPERSONNAGE B:\n(texte)', null, function(r){
+    if(r){
+      document.getElementById('prod-card').style.display='';
+      document.getElementById('prod-card-title').textContent = 'DIALOGUES GÉNÉRÉS';
+      document.getElementById('prod-out').textContent=r;
+      show('prod',nbAt(3));
+      notif('✅ Dialogues générés !');
+    }
+  });
+}
+
+function restructurer(){
+  if(scenes.length<2){ notif('Ajoutez au moins 2 scènes','err'); return; }
+  notif('🔄 Analyse structurale en cours...');
+  var txt = scenes.map(function(s){ return s.num+'. '+s.titre+' — '+(s.desc||'').substring(0,100); }).join('\n');
+  groq('Analyse la structure narrative de ces scènes. Propose un réordonnancement optimal pour maximiser l\'impact dramatique. Explique pourquoi chaque déplacement améliore le récit:\n\n'+txt, null, function(r){
+    if(r){
+      document.getElementById('prod-card').style.display='';
+      document.getElementById('prod-card-title').textContent = 'ANALYSE STRUCTURALE IA';
+      document.getElementById('prod-out').textContent=r;
+      show('prod',nbAt(3));
+      notif('✅ Analyse disponible dans Production');
+    }
+  });
+}
+
+function exportScript(){
+  if(scenes.length===0){ notif('Aucune scène à exporter','err'); return; }
+  var titre = document.getElementById('titre').value || 'Scénario';
+  var type  = (document.querySelector('#type-pills .pill.on')||{}).textContent||'';
+  var persos = getPersonnages();
+  var txt = '╔══════════════════════════════════════╗\n║      BENY-JOE CINIE IA — v4          ║\n║  Fondé par KHEDIM BENYAKHLEF         ║\n╚══════════════════════════════════════╝\n\n';
+  txt += titre.toUpperCase()+'\n';
+  txt += type+'\n';
+  txt += 'Date : '+new Date().toLocaleDateString('fr-FR')+'\n';
+  if(persos.length) txt += '\nPERSONNAGES:\n'+persos.map(function(p){ return '  · '+p; }).join('\n')+'\n';
+  txt += '\n'+'═'.repeat(50)+'\n\n';
+  scenes.forEach(function(s){
+    txt += 'SCÈNE '+s.num+' — '+s.titre.toUpperCase()+'\n';
+    txt += s.type+'\n\n';
+    txt += (s.desc||'')+'\n\n';
+    txt += '─'.repeat(40)+'\n\n';
+  });
+  dl(txt, (titre||'scenario').replace(/\s+/g,'_')+'_script.txt');
+  sauvegarderFichier(txt, (titre||'scenario').replace(/\s+/g,'_')+'_script.txt');
+  notif('✅ Script exporté et sauvegardé !');
+}
+
+/* ══════════════════ IMPORT ══════════════════ */
+function loadFile(input){
+  var file = input.files[0]; if(!file) return;
+  if(file.size > 5*1024*1024){ notif('Fichier trop grand (max 5 MB)','err'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e){ document.getElementById('imp-text').value=e.target.result.substring(0,12000); notif('📂 Fichier chargé ('+Math.round(file.size/1024)+' KB)'); };
+  reader.onerror = function(){ notif('Erreur de lecture du fichier','err'); };
   reader.readAsText(file,'UTF-8');
 }
 
-async function analyserTexte(){
-  const text=document.getElementById('import-text').value.trim();
-  const type=document.getElementById('import-type').value;
-  const adapt=document.getElementById('import-adapt').value;
-  if(!text){notif('Importez ou collez un texte','error');return;}
-  notif('🔍 Analyse...');
-  const r=await callClaude('Analyse ce texte et adapte-le en scénario cinéma.\nTYPE: '+type+'\nADAPTATION: '+adapt+'\n\nTEXTE:\n'+text.substring(0,3000)+'\n\nExtrait: personnages, scènes clés, dialogues, structure narrative.');
-  if(r){document.getElementById('import-result').style.display='block';document.getElementById('import-output').textContent=r;notif('✅ Analyse terminée !','success');}
+function analyserTexte(){
+  var text = document.getElementById('imp-text').value.trim();
+  if(text.length < 50){ notif('Texte trop court — minimum 50 caractères','err'); return; }
+  notif('🔍 Analyse et adaptation en cours (Groq Llama 3.3)...');
+  groq(
+    'Analyse ce texte et crée une ADAPTATION CINÉMATOGRAPHIQUE PROFESSIONNELLE complète.\n\nTYPE ORIGINAL: '+document.getElementById('imp-type').value+'\nADAPTER EN: '+document.getElementById('imp-adapt').value+'\n\nTEXTE ORIGINAL (extrait):\n'+text.substring(0,4000)+'\n\nLivre:\n1. RÉSUMÉ (200 mots)\n2. PERSONNAGES PRINCIPAUX\n3. DÉCOUPAGE EN SCÈNES (5 scènes minimum)\n4. NOTES DE RÉALISATION\n5. AMBIANCE VISUELLE RECOMMANDÉE',
+    'Tu es un adaptateur cinéma professionnel spécialisé. Crée des adaptations de haute qualité.',
+    function(r){
+      if(r){
+        document.getElementById('imp-result').style.display='';
+        document.getElementById('imp-out').textContent=r;
+        notif('✅ Adaptation terminée !');
+      }
+    }
+  );
 }
 
-function importerVersScenario(){
-  const text=document.getElementById('import-output').textContent;
-  if(!text)return;
-  document.getElementById('synopsis').value=text.substring(0,1000);
-  goTab('tab-scenario',document.querySelectorAll('.nav-btn')[1]);
-  notif('✅ Envoyé vers Scénario !','success');
+function impVersScenario(){
+  var text = document.getElementById('imp-out').textContent;
+  if(!text){ notif('Rien à transférer','err'); return; }
+  document.getElementById('synopsis').value = text.substring(0,1200);
+  show('scen',nbAt(1));
+  notif('✅ Envoyé vers Scénario !');
 }
 
-// ─── MONTAGE ──────────────────────────────────────────────────────────────────
-function ajouterClip(){
-  const nom=prompt('Nom du clip:');if(!nom)return;
-  const t=document.getElementById('timeline-video');
-  const c=document.createElement('div');c.className='tl-clip';
-  c.innerHTML='<span>'+nom+'</span><span style="font-size:.6rem;color:var(--muted);">VIDEO</span>';
-  t.appendChild(c);
+/* ══════════════════ PRODUCTION ══════════════════ */
+function selProd(type, el){
+  prodType = type;
+  document.querySelectorAll('[id^="pt-"]').forEach(function(c){ c.classList.remove('sel'); });
+  if(el) el.classList.add('sel');
 }
 
-function ajouterMusique(){
-  const nom=prompt('Titre musique:');if(!nom)return;
-  const t=document.getElementById('timeline-audio');
-  const c=document.createElement('div');c.className='tl-clip';
-  c.style.cssText='background:rgba(74,158,255,.15);border-color:rgba(74,158,255,.3);';
-  c.innerHTML='<span style="color:var(--blue)">'+nom+'</span><span style="font-size:.6rem;color:var(--muted);">AUDIO</span>';
-  t.appendChild(c);
+function lancerProd(){
+  var style   = document.getElementById('style').value;
+  var ratio   = document.getElementById('ratio').value;
+  var palette = document.getElementById('palette').value;
+  var langue  = document.getElementById('lang-prod').value;
+  var crit    = document.getElementById('criteres').value;
+  var syn     = document.getElementById('synopsis').value||'';
+  var titre   = document.getElementById('titre').value||'Non défini';
+  document.getElementById('prod-card').style.display='';
+  document.getElementById('prod-card-title').textContent='PLAN DE PRODUCTION IA';
+  document.getElementById('prod-pb').style.width='15%';
+  document.getElementById('prod-out').textContent='⏳ Génération par Groq Llama 3.3 70B...';
+  var p = 'CRÉE UN PLAN DE PRODUCTION CINÉMATOGRAPHIQUE ULTRA-PROFESSIONNEL:\n\nPROJET: '+titre+'\nTYPE: '+prodType.toUpperCase()+'\nSTYLE VISUEL: '+style+'\nRATIO: '+ratio+'\nCOLOR GRADING: '+palette+'\nLANGUE: '+langue+'\nSCÈNES: '+scenes.length+'\nSYNOPSIS: '+syn.substring(0,300)+'\nCRITÈRES: '+(crit||'Standard')+'\n\nInclure:\n1. PRÉ-PRODUCTION (casting, repérages, équipement)\n2. TOURNAGE (planning journalier, équipe technique)\n3. POST-PRODUCTION (montage, color grading, son)\n4. OUTILS IA GRATUITS recommandés pour chaque étape\n5. PLANNING 4 SEMAINES (tableau)\n6. BUDGET ZÉRO (solutions gratuites uniquement)';
+  document.getElementById('prod-pb').style.width='55%';
+  groq(p, 'Tu es un producteur de cinéma professionnel avec 20 ans d\'expérience. Crée des plans de production détaillés et réalistes.', function(r){
+    document.getElementById('prod-pb').style.width='100%';
+    if(r){ document.getElementById('prod-out').textContent=r; notif('✅ Plan de production généré par Groq Llama 3.3 !'); }
+  });
 }
 
-async function genererMontage(){
-  const synopsis=document.getElementById('synopsis')?.value||'';
-  notif('🤖 Conseils montage...');
-  const r=await callClaude('Recommandations de montage professionnel:\nFilm: '+prodType+' — Scènes: '+scenes.length+'\nSynopsis: '+(synopsis.substring(0,300)||'Non défini')+'\n\nConseils: rythme, transitions, ordre, musique, longueur des plans.');
-  if(r){document.getElementById('montage-suggestions').textContent=r;notif('✅ Recommandations prêtes !','success');}
+function genPromptsProd(){
+  if(scenes.length===0){ notif('Ajoutez des scènes d\'abord','err'); return; }
+  notif('🤖 Génération des prompts visuels...');
+  var txt = scenes.slice(0,10).map(function(s){ return s.num+'. '+s.titre+': '+(s.desc||'').substring(0,150); }).join('\n');
+  var style = document.getElementById('style').value;
+  groq('Génère des prompts Stable Diffusion XL ultra-optimisés, un par scène:\n\nSTYLE GLOBAL: '+style+'\n\nSCÈNES:\n'+txt+'\n\nFormat pour chaque: SCÈNE N — TITRE:\n[POSITIVE PROMPT en anglais, très détaillé]\n[NEGATIVE PROMPT]', null, function(r){
+    if(r){
+      document.getElementById('prod-card').style.display='';
+      document.getElementById('prod-card-title').textContent='PROMPTS VISUELS PAR SCÈNE';
+      document.getElementById('prod-out').textContent=r;
+      notif('✅ '+scenes.length+' prompts générés !');
+    }
+  });
 }
 
-// ─── CHAT ─────────────────────────────────────────────────────────────────────
-async function envoyerMessage(){
-  const input=document.getElementById('chat-input');
-  const msg=input.value.trim();if(!msg)return;
-  input.value='';
-  const box=document.getElementById('chat-box');
-  box.innerHTML+='<div class="msg msg-user"><div class="msg-name">VOUS</div>'+msg+'</div>';
-  const loading=document.createElement('div');loading.className='msg msg-ai';
-  loading.innerHTML='<div class="msg-name">🎬 BENY-JOE CINIE IA</div><span class="loader"></span>';
-  box.appendChild(loading);box.scrollTop=box.scrollHeight;
-  chatHistory.push({role:'user',content:msg});
-  const mode=document.querySelector('#mode-pills .pill.active')?.textContent||'Libre';
-  const synopsis=document.getElementById('synopsis')?.value||'';
-  const sys='Tu es BENY-JOE CINIE IA, assistant cinéma professionnel fondé par KHEDIM BENYAKHLEF dit BENY-JOE. Mode: '+mode+(synopsis?'. Projet: '+synopsis.substring(0,200):'')+'. Réponds en français de façon professionnelle et créative.';
-  const t=localStorage.getItem('bjci_token');
-  try{
-    const r=await fetch('/api/claude',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+t},body:JSON.stringify({messages:chatHistory.slice(-10),system:sys,max_tokens:2000})});
-    const d=await r.json();loading.remove();
-    if(d.text){chatHistory.push({role:'assistant',content:d.text});box.innerHTML+='<div class="msg msg-ai"><div class="msg-name">🎬 BENY-JOE CINIE IA</div>'+d.text.replace(/\n/g,'<br>')+'</div>';}
-    else{notif('Erreur IA: '+(d.error||'inconnue'),'error');}
-  }catch(e){loading.remove();notif('Erreur réseau','error');}
-  box.scrollTop=box.scrollHeight;
+function genVoixOff(){
+  var syn = document.getElementById('synopsis').value||'';
+  if(!syn){ notif('Écrivez votre synopsis d\'abord','err'); return; }
+  notif('🤖 Génération de la narration...');
+  groq('Écris une NARRATION VOIX OFF cinématographique professionnelle pour ce projet:\n\nSYNOPSIS: '+syn+'\nTYPE: '+prodType+'\nSTYLE: '+document.getElementById('style').value+'\n\nCrée:\n1. Narration d\'ouverture (30 sec)\n2. Narrations des scènes principales\n3. Narration de clôture\n4. Texte pour ElevenLabs (prêt à coller)', null, function(r){
+    if(r){
+      document.getElementById('prod-card').style.display='';
+      document.getElementById('prod-card-title').textContent='NARRATION / VOIX OFF';
+      document.getElementById('prod-out').textContent=r;
+      notif('✅ Narration générée !');
+    }
+  });
 }
 
-function quickPrompt(p){document.getElementById('chat-input').value=p;envoyerMessage();}
-function effacerChat(){chatHistory=[];document.getElementById('chat-box').innerHTML='<div class="msg msg-ai"><div class="msg-name">🎬 BENY-JOE CINIE IA</div>Chat effacé. Comment puis-je vous aider ?</div>';}
-document.getElementById('chat-input').addEventListener('keydown',e=>{if(e.key==='Enter')envoyerMessage();});
-
-// ─── EXPORTS ──────────────────────────────────────────────────────────────────
-function exporterScript(){
-  if(scenes.length===0){notif('Aucune scène','error');return;}
-  const titre=document.getElementById('proj-titre')?.value||'Scénario';
-  let txt='BENY-JOE CINIE IA\\nFondé par KHEDIM BENYAKHLEF dit BENY-JOE\\n\\n'+titre.toUpperCase()+'\\n\\n'+new Date().toLocaleDateString('fr-FR')+'\\n\\n'+'='.repeat(50)+'\\n\\n';
-  scenes.forEach(s=>{txt+='SCÈNE '+s.num+' — '+s.titre+'\\n\\n'+(s.desc||'')+'\\n\\n'+'-'.repeat(40)+'\\n\\n';});
-  downloadTxt(txt,(titre||'scenario')+'_script.txt');
-  notif('✅ Script exporté !','success');
+function genFiche(){
+  var titre = document.getElementById('titre').value||'Non défini';
+  var syn   = document.getElementById('synopsis').value||'';
+  notif('🤖 Génération de la fiche technique...');
+  groq('Crée une FICHE TECHNIQUE CINÉMATOGRAPHIQUE PROFESSIONNELLE complète pour:\n\nTITRE: '+titre+'\nTYPE: '+prodType+'\nSTYLE: '+document.getElementById('style').value+'\nRATIO: '+document.getElementById('ratio').value+'\nSYNOPSIS: '+syn.substring(0,200)+'\n\nInclure: format de tournage, équipement caméra recommandé, éclairage, son, outils de montage, étalonage, distribution, festivals cibles.', null, function(r){
+    if(r){
+      document.getElementById('prod-card').style.display='';
+      document.getElementById('prod-card-title').textContent='FICHE TECHNIQUE';
+      document.getElementById('prod-out').textContent=r;
+      notif('✅ Fiche technique générée !');
+    }
+  });
 }
 
-function exporterTxt(id,filename){
-  const el=document.getElementById(id);if(!el||!el.textContent.trim()){notif('Rien à exporter','error');return;}
-  downloadTxt(el.textContent,filename);notif('✅ Exporté !','success');
+/* ══════════════════ VISUELS ══════════════════ */
+function genPromptVisuel(){
+  var desc = document.getElementById('vis-desc').value.trim();
+  if(!desc){ notif('Décrivez votre scène','err'); return; }
+  notif('🤖 Génération du prompt optimisé...');
+  groq('Génère un prompt image ULTRA-OPTIMISÉ pour Stable Diffusion XL / Leonardo AI.\n\nDESCRIPTION: '+desc+'\nSTYLE: '+document.getElementById('vis-style').value+'\n\nFormat:\n✅ POSITIVE PROMPT (anglais, très détaillé — composition, éclairage, caméra, qualité, style):\n[prompt]\n\n❌ NEGATIVE PROMPT:\n[prompt négatif]\n\n💡 VARIATIONS SUGGÉRÉES:\n[3 variations]', null, function(r){
+    if(r){
+      document.getElementById('vis-out').textContent=r;
+      notif('✅ Prompt optimisé généré !');
+    }
+  });
 }
 
-function downloadTxt(content,filename){
-  const blob=new Blob([content],{type:'text/plain;charset=utf-8'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;a.click();
+function genStoryboard(){
+  if(scenes.length===0){ notif('Ajoutez des scènes d\'abord','err'); return; }
+  var c = document.getElementById('sb-grid'); c.innerHTML='';
+  document.getElementById('sb-empty').style.display='none';
+  notif('🤖 Génération du storyboard complet...');
+  var txt = scenes.map(function(s){ return s.num+'. '+s.titre+' ('+s.type+'): '+(s.desc||'').substring(0,120); }).join('\n');
+  var style = document.getElementById('vis-style').value;
+  groq('Génère un prompt Stable Diffusion XL pour chaque scène du storyboard.\n\nSTYLE GLOBAL: '+style+'\nSCÈNES:\n'+txt+'\n\nFormat STRICT pour chaque ligne:\nSCÈNE N|prompt_anglais_détaillé\n\nUn seul pipe (|) par ligne. Pas de guillemets.', null, function(r){
+    if(!r){ document.getElementById('sb-empty').style.display=''; return; }
+    var lines = r.split('\n').filter(function(l){ return l.includes('|'); });
+    if(lines.length===0){ document.getElementById('sb-empty').style.display=''; notif('Erreur de format','err'); return; }
+    lines.forEach(function(line, idx){
+      var parts = line.split('|');
+      var label  = (parts[0]||'SCÈNE '+(idx+1)).trim();
+      var prompt = (parts[1]||'').trim();
+      var d = document.createElement('div'); d.className='sb-card';
+      d.innerHTML=
+        '<div class="sb-num">'+esc(label)+'</div>'+
+        '<div class="sb-prompt" id="sbp-'+idx+'">'+esc(prompt)+'</div>'+
+        '<div style="display:flex;gap:.32rem;flex-wrap:wrap">'+
+          '<button class="btn btn-out btn-sm" onclick="copyEl(this.previousElementSibling.previousElementSibling)">📋 Copier</button>'+
+          '<button class="btn btn-out btn-sm" onclick="window.open(\'https://leonardo.ai\',\'_blank\')">→ Leonardo</button>'+
+          '<button class="btn btn-out btn-sm" onclick="window.open(\'https://www.bing.com/images/create\',\'_blank\')">→ Bing</button>'+
+        '</div>';
+      c.appendChild(d);
+    });
+    notif('✅ Storyboard généré — '+lines.length+' planches !');
+  });
 }
+
+function exportStoryboard(){
+  if(scenes.length===0){ notif('Aucune scène','err'); return; }
+  var items = document.querySelectorAll('.sb-prompt');
+  if(items.length===0){ notif('Générez d\'abord le storyboard','err'); return; }
+  var titre = document.getElementById('titre').value||'storyboard';
+  var txt = 'BENY-JOE CINIE IA — STORYBOARD\nFondé par KHEDIM BENYAKHLEF dit BENY-JOE\n\nTITRE: '+titre+'\n\n'+'═'.repeat(50)+'\n\n';
+  items.forEach(function(el, i){ txt += 'PLANCHE '+(i+1)+':\n'+el.textContent+'\n\nOutil: https://leonardo.ai\n\n'+'─'.repeat(40)+'\n\n'; });
+  dl(txt, titre.replace(/\s+/g,'_')+'_storyboard.txt');
+  sauvegarderFichier(txt, titre.replace(/\s+/g,'_')+'_storyboard.txt');
+  notif('✅ Storyboard exporté !');
+}
+
+/* ══════════════════ MONTAGE ══════════════════ */
+function addClip(){
+  var nom = prompt('Nom du clip vidéo:'); if(!nom) return;
+  var dur = prompt('Durée (ex: 00:45):') || '';
+  var c = document.createElement('div'); c.className='clip';
+  c.innerHTML='<span>'+esc(nom)+'</span><span style="font-size:.58rem;color:var(--mu)">'+(dur||'VIDEO')+'</span><button class="clip-del" onclick="this.parentNode.remove();clipCount--;updateHomeStats()">✕</button>';
+  var wrap = document.getElementById('tl-video');
+  var empty = wrap.querySelector('span[style*="color:var(--dim)"]');
+  if(empty) empty.remove();
+  wrap.appendChild(c);
+  clipCount++; updateHomeStats();
+}
+
+function addMusic(){
+  var nom = prompt('Titre de la musique / son:'); if(!nom) return;
+  var c = document.createElement('div'); c.className='clip clip-audio';
+  c.innerHTML='<span>'+esc(nom)+'</span><span style="font-size:.58rem;color:var(--mu)">AUDIO</span><button class="clip-del" onclick="this.parentNode.remove();clipCount--;updateHomeStats()" style="color:rgba(74,158,255,.7)">✕</button>';
+  var wrap = document.getElementById('tl-audio');
+  var empty = wrap.querySelector('span[style*="color:var(--dim)"]');
+  if(empty) empty.remove();
+  wrap.appendChild(c);
+  clipCount++; updateHomeStats();
+}
+
+function addVO(){
+  var nom = prompt('Description voix off:'); if(!nom) return;
+  var c = document.createElement('div');
+  c.style.cssText='background:rgba(155,127,232,.15);border:1px solid rgba(155,127,232,.3);border-radius:4px;height:40px;min-width:80px;padding:.22rem .45rem;font-size:.62rem;color:var(--pur);cursor:pointer;display:flex;flex-direction:column;justify-content:space-between;position:relative';
+  c.innerHTML='<span>'+esc(nom)+'</span><span style="font-size:.58rem;color:var(--mu)">VOIX</span><button class="clip-del" onclick="this.parentNode.remove();clipCount--;updateHomeStats()">✕</button>';
+  var wrap = document.getElementById('tl-vo');
+  var empty = wrap.querySelector('span[style*="color:var(--dim)"]');
+  if(empty) empty.remove();
+  wrap.appendChild(c);
+  clipCount++; updateHomeStats();
+  document.getElementById('clip-count').textContent = clipCount + ' élément(s) dans la timeline';
+}
+
+function clearTimeline(){
+  if(!confirm('Vider toute la timeline ?')) return;
+  ['tl-video','tl-audio','tl-vo'].forEach(function(id){
+    var w = document.getElementById(id); w.innerHTML='';
+    var label = id==='tl-video'?'Aucun clip — cliquez "+ Clip vidéo"':id==='tl-audio'?'Aucune piste — cliquez "+ Musique"':'Aucune voix — cliquez "+ Voix Off"';
+    w.innerHTML='<span style="color:var(--dim);font-size:.72rem;padding:.3rem">'+label+'</span>';
+  });
+  clipCount=0; updateHomeStats(); notif('🗑️ Timeline vidée');
+}
+
+function genMontage(){
+  notif('🤖 Analyse du montage par Groq Llama 3.3...');
+  var syn   = document.getElementById('synopsis')? document.getElementById('synopsis').value:'';
+  var titre = document.getElementById('titre')? document.getElementById('titre').value:'';
+  var clips = Array.from(document.querySelectorAll('#tl-video .clip span:first-child')).map(function(s){ return s.textContent; });
+  groq(
+    'Donne des RECOMMANDATIONS DE MONTAGE PROFESSIONNEL ultra-détaillées:\n\nPROJET: '+(titre||'Non défini')+'\nTYPE: '+prodType+'\nNB SCÈNES: '+scenes.length+'\nCLIPS TIMELINE: '+(clips.length?clips.join(', '):'non définis')+'\nSYNOPSIS: '+(syn.substring(0,300)||'Non défini')+'\n\nConseils sur:\n1. Rythme et durée des plans\n2. Types de transitions recommandées\n3. Structure narrative du montage\n4. Traitement sonore et musical\n5. Color grading avec DaVinci Resolve\n6. Logiciels gratuits et tutoriels\n7. Export final (format, codec, plateforme)',
+    'Tu es un monteur cinéma primé à Cannes. Donne des conseils professionnels concrets.',
+    function(r){
+      if(r){ document.getElementById('mont-out').textContent=r; notif('✅ Recommandations générées !'); }
+    }
+  );
+}
+
+/* ══════════════════ CHAT ══════════════════ */
+function sendMsg(){
+  var inp = document.getElementById('chat-in');
+  var msg = inp.value.trim(); if(!msg) return;
+  inp.value='';
+  var box = document.getElementById('chat-box');
+  box.innerHTML += '<div class="msg msg-user"><div class="msg-name">VOUS</div>'+esc(msg)+'</div>';
+  var ld = document.createElement('div'); ld.className='msg msg-ai';
+  ld.innerHTML='<div class="msg-name">🎬 BENY-JOE CINIE IA</div><span class="ld"></span>';
+  box.appendChild(ld); box.scrollTop=box.scrollHeight;
+  chatHist.push({role:'user',content:msg});
+  var mode = (document.querySelector('#mode-pills .pill.on')||{}).textContent||'Libre';
+  var syn  = document.getElementById('synopsis')? document.getElementById('synopsis').value:'';
+  var titre= document.getElementById('titre')? document.getElementById('titre').value:'';
+  fetch('/api/groq',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      messages: chatHist.slice(-12),
+      system: 'Tu es BENY-JOE CINIE IA, assistant cinéma professionnel fondé par KHEDIM BENYAKHLEF dit BENY-JOE. Propulsé par Groq Llama 3.3 70B. Mode: '+mode+(titre?'. Projet en cours: '+titre:'')+(syn?'. Synopsis: '+syn.substring(0,150):'')+'. Réponds en français, de façon professionnelle, précise et créative. Tu peux utiliser des emojis cinéma avec modération.'
+    })
+  })
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    ld.remove();
+    if(d.text){
+      chatHist.push({role:'assistant',content:d.text});
+      box.innerHTML+='<div class="msg msg-ai"><div class="msg-name">🎬 BENY-JOE CINIE IA — Groq Llama 3.3</div>'+d.text.replace(/\n/g,'<br>')+'</div>';
+      updateHomeStats();
+    } else notif('Erreur IA : '+(d.error||'inconnue'),'err');
+    box.scrollTop=box.scrollHeight;
+  })
+  .catch(function(){ ld.remove(); notif('Erreur réseau','err'); });
+}
+
+function qp(p){ document.getElementById('chat-in').value=p; sendMsg(); }
+
+function clearChat(){
+  chatHist=[];
+  document.getElementById('chat-box').innerHTML='<div class="msg msg-ai"><div class="msg-name">🎬 BENY-JOE CINIE IA</div>Chat réinitialisé. Comment puis-je vous aider ?</div>';
+  updateHomeStats();
+}
+
+/* ══════════════════ PRODUITS FINAUX ══════════════════ */
+function sauvegarderProduit(srcId, nom, type){
+  var el = document.getElementById(srcId);
+  if(!el||!el.textContent.trim()){ notif('Rien à sauvegarder','err'); return; }
+  var content = el.textContent.trim();
+  var titre   = (document.getElementById('titre')? document.getElementById('titre').value : '') || 'Projet';
+  var prod = {
+    id: Date.now(), nom: nom, type: type, titre: titre,
+    content: content, date: new Date().toLocaleString('fr-FR'),
+    size: content.length
+  };
+  produits.push(prod);
+  // Sauvegarder sur le serveur
+  sauvegarderFichier(content, type+'_'+Date.now()+'.txt');
+  notif('✅ "'+nom+'" sauvegardé dans Produits Finaux !');
+  updateHomeStats();
+}
+
+function sauvegarderFichier(content, filename){
+  fetch('/api/save-export', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({content:content, filename:filename})
+  }).catch(function(){});
+}
+
+function chargerExports(){
+  // Afficher les produits locaux
+  var grid = document.getElementById('export-grid');
+  grid.innerHTML='';
+  if(produits.length===0){
+    grid.innerHTML='<div class="product-empty" id="export-empty"><div class="product-empty-icon">📂</div><div class="product-empty-txt">Aucun produit sauvegardé.<br>Générez du contenu et cliquez "💾 Sauvegarder".</div></div>';
+  } else {
+    produits.forEach(function(p, i){
+      var icons = {adaptation:'📚',plan_production:'🎬',plan_montage:'✂️',prompt_visuel:'🖼️',Adaptation:'📚',default:'📄'};
+      var icon  = icons[p.type]||icons.default;
+      var d = document.createElement('div'); d.className='product-card';
+      d.innerHTML=
+        '<div class="product-type" style="color:var(--gold)">'+icon+' '+p.type.toUpperCase()+'</div>'+
+        '<div class="product-title">'+esc(p.nom)+'</div>'+
+        '<div class="product-meta">📁 '+esc(p.titre)+' · 📅 '+p.date+' · '+Math.round(p.size/1000)+' KB</div>'+
+        '<div class="product-preview">'+esc(p.content.substring(0,300))+'...</div>'+
+        '<div class="product-actions">'+
+          '<button class="btn btn-gold btn-sm" onclick="voirProduit('+i+')">👁️ Voir</button>'+
+          '<button class="btn btn-grn btn-sm" onclick="dlProduit('+i+')">💾 Télécharger</button>'+
+          '<button class="btn btn-out btn-sm" onclick="copierProduit('+i+')">📋 Copier</button>'+
+          '<button class="btn btn-red btn-sm" onclick="supprimerProduit('+i+')">🗑️</button>'+
+        '</div>';
+      grid.appendChild(d);
+    });
+  }
+  // Charger les fichiers serveur
+  fetch('/api/list-exports')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var list = document.getElementById('export-files-list');
+      if(!d.files||d.files.length===0){
+        list.innerHTML='<div style="text-align:center;padding:1.5rem;color:var(--dim);font-size:.78rem">Aucun fichier exporté sur le serveur.</div>';
+        return;
+      }
+      list.innerHTML='';
+      d.files.forEach(function(f){
+        var row = document.createElement('div'); row.className='export-row';
+        var ext = f.name.split('.').pop();
+        var ic  = ext==='txt'?'📄':ext==='pdf'?'📕':'📁';
+        var size= f.size>1024?Math.round(f.size/1024)+' KB':f.size+' B';
+        var date= new Date(f.date).toLocaleString('fr-FR');
+        row.innerHTML=
+          '<div class="export-icon">'+ic+'</div>'+
+          '<div class="export-info"><div class="export-name">'+esc(f.name)+'</div><div class="export-meta">'+size+' · '+date+'</div></div>'+
+          '<div class="export-acts">'+
+            '<button class="btn btn-gold btn-sm" onclick="dlServeur(\''+encodeURIComponent(f.name)+'\')">💾 Télécharger</button>'+
+            '<button class="btn btn-red btn-sm" onclick="supprServeur(\''+encodeURIComponent(f.name)+'\',this.closest(\'.export-row\'))">🗑️</button>'+
+          '</div>';
+        list.appendChild(row);
+      });
+    }).catch(function(){});
+}
+
+function voirProduit(i){
+  var p = produits[i]; if(!p) return;
+  document.getElementById('modal-title').textContent = p.nom+' — '+p.titre;
+  document.getElementById('modal-body').textContent = p.content;
+  document.getElementById('modal-bg').classList.add('open');
+  window._modalContent = p.content;
+  window._modalFilename = p.type+'_'+p.titre.replace(/\s+/g,'_')+'.txt';
+}
+
+function dlProduit(i){
+  var p = produits[i]; if(!p) return;
+  dl(p.content, p.type+'_'+p.titre.replace(/\s+/g,'_')+'.txt');
+  notif('✅ Téléchargement de "'+p.nom+'"...');
+}
+
+function copierProduit(i){
+  var p = produits[i]; if(!p) return;
+  navigator.clipboard.writeText(p.content).then(function(){ notif('📋 Copié dans le presse-papier !'); }).catch(function(){ notif('Copie impossible','err'); });
+}
+
+function supprimerProduit(i){
+  if(!confirm('Supprimer ce produit ?')) return;
+  produits.splice(i,1);
+  chargerExports();
+  updateHomeStats();
+  notif('🗑️ Produit supprimé');
+}
+
+function exporterTout(){
+  if(produits.length===0){ notif('Aucun produit à exporter','err'); return; }
+  var tout = produits.map(function(p){
+    return '═══════════════════════════\n'+p.nom.toUpperCase()+' — '+p.titre+'\n'+p.date+'\n═══════════════════════════\n\n'+p.content+'\n\n';
+  }).join('\n');
+  dl(tout, 'beny_joe_cinie_exports_'+Date.now()+'.txt');
+  notif('✅ Tous les produits téléchargés !');
+}
+
+function supprimerTout(){
+  if(!confirm('Supprimer TOUS les produits ? Cette action est irréversible.')) return;
+  produits=[];
+  chargerExports();
+  updateHomeStats();
+  notif('🗑️ Tous les produits supprimés');
+}
+
+function dlServeur(filename){
+  window.open('/api/download-export?file='+filename,'_blank');
+}
+
+function supprServeur(filename, row){
+  if(!confirm('Supprimer ce fichier du serveur ?')) return;
+  fetch('/api/delete-export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:decodeURIComponent(filename)})})
+  .then(function(r){ return r.json(); })
+  .then(function(d){ if(d.success){ row.remove(); notif('🗑️ Fichier supprimé'); } else notif('Erreur','err'); })
+  .catch(function(){ notif('Erreur réseau','err'); });
+}
+
+/* ══════════════════ MODAL ══════════════════ */
+function fermerModal(e){
+  if(!e||e.target===document.getElementById('modal-bg')||e.type!=='click'||e.target.closest('.modal')){
+    if(e && e.target.closest('.modal') && e.target!==document.getElementById('modal-bg')) return;
+    document.getElementById('modal-bg').classList.remove('open');
+  }
+  if(!e) document.getElementById('modal-bg').classList.remove('open');
+}
+function telechargerModal(){ if(window._modalContent) dl(window._modalContent, window._modalFilename||'export.txt'); }
+function copierModal(){ if(window._modalContent) navigator.clipboard.writeText(window._modalContent).then(function(){ notif('📋 Copié !'); }); }
+
+/* ══════════════════ UTILITAIRES ══════════════════ */
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escA(s){ return esc(s).replace(/'/g,'&#39;'); }
 
 function copier(id){
-  const el=document.getElementById(id);if(!el)return;
-  navigator.clipboard.writeText(el.textContent);notif('📋 Copié !','success');
+  var el=document.getElementById(id); if(!el) return;
+  navigator.clipboard.writeText(el.textContent).then(function(){ notif('📋 Copié !'); }).catch(function(){ notif('Copie impossible','err'); });
 }
+
+function copyEl(el){
+  navigator.clipboard.writeText(el.textContent).then(function(){ notif('📋 Copié !'); }).catch(function(){ notif('Copie impossible','err'); });
+}
+
+function dl(content, filename){
+  var blob = new Blob([content],{type:'text/plain;charset=utf-8'});
+  var a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 1000);
+}
+
+function resetProjet(){
+  if(!confirm('Réinitialiser TOUT le projet ? (scènes, historique, exports locaux)')) return;
+  scenes=[]; chatHist=[]; produits=[]; clipCount=0;
+  document.getElementById('titre').value='';
+  document.getElementById('synopsis').value='';
+  document.getElementById('perso-list').innerHTML='';
+  document.getElementById('scene-list').innerHTML='';
+  document.getElementById('scene-empty').style.display='';
+  document.getElementById('scene-count').textContent='0 scène(s)';
+  ['tl-video','tl-audio','tl-vo'].forEach(function(id){ document.getElementById(id).innerHTML=''; });
+  updateHomeStats();
+  notif('✅ Projet réinitialisé');
+}
+
+/* ══════════════════ INIT ══════════════════ */
+window.addEventListener('load', function(){
+  initPills();
+  checkKey();
+  document.getElementById('chat-in').addEventListener('keydown', function(e){
+    if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendMsg(); }
+  });
+  // Keyboard nav
+  document.addEventListener('keydown', function(e){
+    if(e.key==='Escape') fermerModal();
+  });
+  updateHomeStats();
+  // Step bar animation
+  document.querySelectorAll('.step-item').forEach(function(s,i){
+    s.addEventListener('click', function(){
+      document.querySelectorAll('.step-item').forEach(function(x){ x.classList.remove('on'); });
+      s.classList.add('on');
+    });
+  });
+});
 </script>
 </body>
 </html>`;
 
 // ─── SERVEUR HTTP ─────────────────────────────────────────────────────────────
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
-  const path_ = url.pathname;
-  const method = req.method;
+const server = http.createServer(async function(req, res) {
+  const u = new URL(req.url, 'http://x');
+  const p = u.pathname;
+  const m = req.method;
 
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (m === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
-  const json = (d, code = 200) => { res.writeHead(code, {'Content-Type':'application/json'}); res.end(JSON.stringify(d)); };
-
-  // ─── API ──────────────────────────────────────────────────────────────────
-  if (path_ === '/api/register' && method === 'POST') {
-    const { username, password, name } = await parseBody(req);
-    if (!username || !password || username.length < 3 || password.length < 6)
-      return json({ error: 'Identifiant (min 3) et mot de passe (min 6) requis' }, 400);
-    const users = loadJ(USERS_F, {});
-    if (users[username]) return json({ error: 'Nom d\'utilisateur déjà pris' }, 409);
-    users[username] = { username, password: hashPwd(password), role: 'user', name: name || username };
-    saveJ(USERS_F, users);
-    const token = createSession(username);
-    return json({ success: true, token, username, name: users[username].name, role: 'user' });
+  function json(d, code) {
+    res.writeHead(code || 200, {'Content-Type': 'application/json; charset=utf-8'});
+    res.end(JSON.stringify(d));
   }
 
-  if (path_ === '/api/login' && method === 'POST') {
-    const { username, password } = await parseBody(req);
-    const users = loadJ(USERS_F, {});
-    const user = users[username];
-    if (!user || user.password !== hashPwd(password)) return json({ error: 'Identifiants incorrects' }, 401);
-    const token = createSession(username);
-    return json({ success: true, token, username, name: user.name, role: user.role });
+  // ── GET /api/key-status ──────────────────────────────────────────────────────
+  if (p === '/api/key-status' && m === 'GET') {
+    return json({ configured: !!GROQ_API_KEY });
   }
 
-  if (path_ === '/api/logout' && method === 'POST') {
-    const sessions = loadJ(SESS_F, {});
-    delete sessions[getToken(req)];
-    saveJ(SESS_F, sessions);
-    return json({ success: true });
+  // ── POST /api/groq ─────────────────────────────────────────────────────────
+  if (p === '/api/groq' && m === 'POST') {
+    
+    if (!GROQ_API_KEY) {
+      return json({ error: 'Clé API Groq non configurée. Allez dans ⚙️ Config.' }, 503);
+    }
+    const b = await readBody(req);
+    if (!b.messages || !Array.isArray(b.messages) || b.messages.length === 0) {
+      return json({ error: 'Paramètre messages manquant ou vide' }, 400);
+    }
+    try {
+      const result = await callGroq(b.messages, b.system || null);
+      if (result.error) {
+        const msg = result.error.message || JSON.stringify(result.error);
+        return json({ error: msg }, 502);
+      }
+      var text = '';
+      if (result.choices && result.choices[0]) {
+        const cand = result.choices[0];
+        if (cand.message && cand.message.content) {
+          text = cand.message.content;
+        }
+        if (cand.finish_reason !== 'stop') {
+          return json({ error: 'Réponse bloquée par les filtres de sécurité Groq.' }, 400);
+        }
+      }
+      if (!text) return json({ error: 'Aucune réponse de Groq — vérifiez votre clé API.' }, 502);
+      return json({ text: text });
+    } catch(e) {
+      return json({ error: 'Erreur API : ' + e.message }, 502);
+    }
   }
 
-  if (path_ === '/api/me' && method === 'GET') {
-    const username = validateSession(getToken(req));
-    if (!username) return json({ error: 'Non authentifié' }, 401);
-    const users = loadJ(USERS_F, {});
-    const user = users[username];
-    return json({ username, name: user?.name, role: user?.role });
+  // ── POST /api/save-export ────────────────────────────────────────────────────
+  if (p === '/api/save-export' && m === 'POST') {
+    const b = await readBody(req);
+    if (!b.content || !b.filename) return json({ error: 'content et filename requis' }, 400);
+    try {
+      const safeName = b.filename.replace(/[^a-zA-Z0-9_\-.]/g, '_').substring(0, 100);
+      const file = saveExport(safeName, b.content);
+      return json({ success: true, file: file });
+    } catch(e) {
+      return json({ error: e.message }, 500);
+    }
   }
 
-  if (path_ === '/api/key-status' && method === 'GET') {
-    const username = validateSession(getToken(req));
-    if (!username) return json({ error: 'Non authentifié' }, 401);
-    const key = getApiKey();
-    return json({ configured: !!key, partial: key ? key.substring(0, 12) + '...' : null });
+  // ── GET /api/list-exports ────────────────────────────────────────────────────
+  if (p === '/api/list-exports' && m === 'GET') {
+    return json({ files: listExports() });
   }
 
-  if (path_ === '/api/set-key' && method === 'POST') {
-    const username = validateSession(getToken(req));
-    if (!username) return json({ error: 'Non authentifié' }, 401);
-    const users = loadJ(USERS_F, {});
-    if (users[username]?.role !== 'admin') return json({ error: 'Admin requis' }, 403);
-    const { key } = await parseBody(req);
-    if (!key || !key.startsWith('sk-ant-')) return json({ error: 'Clé invalide (doit commencer par sk-ant-)' }, 400);
-    setApiKey(key);
-    return json({ success: true });
-  }
-
-  if (path_ === '/api/claude' && method === 'POST') {
-    const username = validateSession(getToken(req));
-    if (!username) return json({ error: 'Non authentifié' }, 401);
-    const apiKey = getApiKey();
-    if (!apiKey) return json({ error: 'Clé API non configurée. Contactez l\'administrateur.' }, 503);
-    const body = await parseBody(req);
-    const { messages, system, model = 'claude-haiku-4-5-20251001', max_tokens = 4000 } = body;
-    if (!messages) return json({ error: 'Messages requis' }, 400);
-    const payload = JSON.stringify({ model, max_tokens, messages, ...(system ? { system } : {}) });
-    return new Promise(resolve => {
-      const opts = {
-        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(payload) }
-      };
-      const apiReq = https.request(opts, apiRes => {
-        let data = '';
-        apiRes.on('data', c => data += c);
-        apiRes.on('end', () => {
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.error) { res.writeHead(502,{'Content-Type':'application/json'}); res.end(JSON.stringify({error:parsed.error.message})); }
-            else { res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({text:parsed.content?.[0]?.text||''})); }
-          } catch(e) { res.writeHead(500,{'Content-Type':'application/json'}); res.end(JSON.stringify({error:'Erreur parsing'})); }
-          resolve();
-        });
-      });
-      apiReq.on('error', e => { res.writeHead(502,{'Content-Type':'application/json'}); res.end(JSON.stringify({error:e.message})); resolve(); });
-      apiReq.write(payload); apiReq.end();
+  // ── GET /api/download-export ─────────────────────────────────────────────────
+  if (p === '/api/download-export' && m === 'GET') {
+    const filename = u.searchParams.get('file');
+    if (!filename) return json({ error: 'Paramètre file manquant' }, 400);
+    const safe = path.basename(filename).replace(/[^a-zA-Z0-9_\-.]/g, '_');
+    const full = path.join(EXPORTS_DIR, safe);
+    if (!fs.existsSync(full)) return json({ error: 'Fichier introuvable' }, 404);
+    const content = fs.readFileSync(full, 'utf8');
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="' + safe + '"'
     });
+    return res.end(content);
   }
 
-  // ─── FRONTEND (page principale) ───────────────────────────────────────────
+  // ── POST /api/delete-export ──────────────────────────────────────────────────
+  if (p === '/api/delete-export' && m === 'POST') {
+    const b = await readBody(req);
+    if (!b.filename) return json({ error: 'filename requis' }, 400);
+    const safe = path.basename(b.filename).replace(/[^a-zA-Z0-9_\-.]/g, '_');
+    const full = path.join(EXPORTS_DIR, safe);
+    try {
+      if (fs.existsSync(full)) fs.unlinkSync(full);
+      return json({ success: true });
+    } catch(e) {
+      return json({ error: e.message }, 500);
+    }
+  }
+
+  // ── Toutes autres routes → page HTML ────────────────────────────────────────
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(HTML);
+  res.end(PAGE);
 });
 
-initAdmin();
-server.listen(PORT, () => {
-  console.log(`
-  ╔══════════════════════════════════════════════════╗
-  ║       🎬  BENY-JOE CINIE IA — STUDIO            ║
-  ║   Fondé par KHEDIM BENYAKHLEF dit BENY-JOE       ║
-  ╠══════════════════════════════════════════════════╣
-  ║  Serveur : http://localhost:${PORT}                 ║
-  ║  Clé API : variable ANTHROPIC_API_KEY            ║
-  ╚══════════════════════════════════════════════════╝
-  `);
+server.listen(PORT, function() {
+  console.log('');
+  console.log('  ╔════════════════════════════════════════════════════════╗');
+  console.log('  ║        🎬  BENY-JOE CINIE IA — STUDIO ULTIME v4       ║');
+  console.log('  ║     Fondé par KHEDIM BENYAKHLEF dit BENY-JOE           ║');
+  console.log('  ╠════════════════════════════════════════════════════════╣');
+  console.log('  ║  URL     : http://localhost:' + PORT + '                       ║');
+  console.log('  ║  IA      : Google Groq Llama 3.3 70B (1500 req/jour)     ║');
+  console.log('  ║  Exports : _data/exports/ (téléchargement depuis app)  ║');
+  console.log('  ║  Auth    : Variable GROQ_API_KEY (Render Env)          ║');
+  console.log('  ╚════════════════════════════════════════════════════════╝');
+  console.log('');
 });
