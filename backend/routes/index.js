@@ -7,6 +7,7 @@
 const url          = require('url');
 const apiRoutes    = require('./api');
 const staticRoutes = require('./static');
+const { authMiddleware } = require("../middleware/auth");
 const { rateLimiter } = require('../middleware/rateLimiter');
 const { error }    = require('../services/http');
 
@@ -16,7 +17,9 @@ async function handle(req, res) {
   const method   = req.method.toUpperCase();
 
   // ── CORS Preflight ────────────────────────────────────────
-  if (method === 'OPTIONS') {
+  if (authMiddleware(req, res)) return;
+
+  if (method === "OPTIONS") {
     res.writeHead(204, {
       'Access-Control-Allow-Origin':  '*',
       'Access-Control-Allow-Methods': 'GET,POST,DELETE,PUT,OPTIONS',
@@ -42,3 +45,4 @@ async function handle(req, res) {
 }
 
 module.exports = { handle };
+// Auth dev déjà importé — voir patch ci-dessous
