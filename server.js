@@ -957,10 +957,10 @@ footer{text-align:center;padding:.8rem;font-size:.65rem;color:var(--dim);border-
       Obtenez votre clé <strong style="color:var(--gold)">GRATUITE</strong> sur :
       <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--gold)">aistudio.google.com/app/apikey</a><br>
       Plan gratuit : <strong>1500 requêtes/jour</strong> avec Groq Llama 3.3 70B — aucune carte bancaire requise.<br>
-      La clé commence par <code style="color:var(--gold)">AIza...</code> et est stockée uniquement côté serveur.
+      La clé commence par <code style="color:var(--gold)">gsk_...</code> et est stockée uniquement côté serveur.
     </div>
     <div style="display:flex;gap:.42rem;align-items:flex-end">
-      <div style="flex:1"><label>ENTREZ VOTRE CLÉ GEMINI API</label><input type="password" id="key-in" placeholder="AIza..."></div>
+      <div style="flex:1"><label>ENTREZ VOTRE CLÉ GEMINI API</label><input type="password" id="key-in" placeholder="gsk_..."></div>
       <button class="btn btn-gold" onclick="saveKey()">🔒 Sauvegarder</button>
     </div>
     <div style="margin-top:.65rem;display:grid;grid-template-columns:1fr 1fr;gap:.5rem;font-size:.72rem">
@@ -1084,8 +1084,8 @@ function checkKey(){
 
 function saveKey(){
   var k = document.getElementById('key-in').value.trim();
-  if(!k){ notif('Entrez une clé Groq API (AIza...)', 'err'); return; }
-  if(k.length < 20){ notif('Clé invalide — vérifiez qu\'elle commence par AIza...', 'err'); return; }
+  if(!k){ notif('Entrez une clé Groq API (gsk_...)', 'err'); return; }
+  if(k.length < 20){ notif('Clé invalide — vérifiez qu\'elle commence par gsk_...', 'err'); return; }
   fetch('/api/set-key', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({key:k})
