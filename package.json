@@ -10,7 +10,11 @@
   "engines": {
     "node": ">=16.0.0"
   },
-  "keywords": ["cinema", "ia", "groq", "llama", "scenario", "film", "production"],
+  "keywords": [
+    "cinema", "ia", "groq", "llama", "scenario",
+    "film", "production", "storyboard", "montage"
+  ],
   "author": "KHEDIM BENYAKHLEF dit BENY-JOE",
-  "license": "PROPRIETARY"
+  "license": "PROPRIETARY",
+  "dependencies": {}
 }
